@@ -21,4 +21,12 @@ async def upload_file(file: UploadFile, tipo: str = Form(...)):
             detail="O parâmetro 'tipo' deve ser 'auditado' ou 'nauditado'"
         )
     
-    return await process_excel(file, tipo)
+    try:
+        return await process_excel(file, tipo)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao processar arquivo: {str(e)}"
+        )

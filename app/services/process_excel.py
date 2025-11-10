@@ -61,16 +61,18 @@ async def process_excel(file, tipo: str):
             # Aba com resumo
             resumo.to_excel(writer, sheet_name='Resumo', index=False)
         
-        # Resetar o ponteiro do buffer para o início
+        # IMPORTANTE: Resetar o ponteiro para o início ANTES de ler
         output.seek(0)
         
-        # Ler o conteúdo completo do buffer
-        excel_data = output.getvalue()
+        # Ler todo o conteúdo do buffer
+        excel_data = output.read()
+        
+        # Fechar o buffer
         output.close()
         
         # Retornar como StreamingResponse
         return StreamingResponse(
-            io.BytesIO(excel_data),
+            io.BytesIO(excel_data),  # Criar novo BytesIO com os dados
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={
                 "Content-Disposition": f"attachment; filename=planilha_processada_{tipo}.xlsx"
