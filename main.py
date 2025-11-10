@@ -1,7 +1,7 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
-import os
+import io
 
 app = FastAPI()
 
@@ -17,13 +17,16 @@ def home():
     return {"message": "API do Leitor de Arquivos rodando!"}
 
 @app.post("/processar/")
-def processar_excel(caminho: str):
-    if not os.path.exists(caminho):
-        return {"erro": "Arquivo não encontrado."}
-
+async def processar_excel(file: UploadFile = File(...)):
     try:
-        df = pd.read_excel(caminho)
+        contents = await file.read()
+        df = pd.read_excel(io.BytesIO(contents))
         total_linhas = len(df)
-        return {"total_linhas": total_linhas}
+        colunas = list(df.columns)
+        return {
+            "mensagem": "Arquivo processado com sucesso!",
+            "total_linhas": total_linhas,
+            "colunas": colunas
+        }
     except Exception as e:
         return {"erro": str(e)}
