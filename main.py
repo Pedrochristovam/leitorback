@@ -36,6 +36,7 @@ async def processar_excel(file: UploadFile = File(...)):
 @app.post("/processar_contratos/")
 async def processar_contratos_endpoint(
     bank_type: str = Form(...),
+    filter_type: str = Form(...),
     files: List[UploadFile] = File(...)
 ):
     """
@@ -43,13 +44,14 @@ async def processar_contratos_endpoint(
     
     Recebe:
     - bank_type: "bemge" ou "minas_caixa" (Form)
+    - filter_type: "auditado", "nauditado" ou "todos" (Form)
     - files: Lista de arquivos Excel (File)
     
     Retorna:
     - Arquivo Excel consolidado (.xlsx) como StreamingResponse
     """
     try:
-        return await process_contratos(files, bank_type)
+        return await process_contratos(files, bank_type, filter_type)
     except HTTPException:
         raise
     except Exception as e:

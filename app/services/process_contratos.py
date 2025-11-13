@@ -134,13 +134,14 @@ def save_processed_file(df: pd.DataFrame, filepath: str):
     df.to_excel(filepath, index=False, engine='openpyxl')
 
 
-async def process_contratos(files: List[UploadFile], bank_type: str) -> StreamingResponse:
+async def process_contratos(files: List[UploadFile], bank_type: str, filter_type: str = "todos") -> StreamingResponse:
     """
     Processa múltiplas planilhas Excel de contratos.
     
     Args:
         files: Lista de arquivos Excel
         bank_type: "bemge" ou "minas_caixa"
+        filter_type: "auditado", "nauditado" ou "todos"
     
     Returns:
         StreamingResponse com arquivo Excel consolidado
@@ -153,8 +154,27 @@ async def process_contratos(files: List[UploadFile], bank_type: str) -> Streamin
                 detail="bank_type deve ser 'bemge' ou 'minas_caixa'"
             )
         
+        # Validar filter_type
+        if filter_type not in ['auditado', 'nauditado', 'todos']:
+            raise HTTPException(
+                status_code=400,
+                detail="filter_type deve ser 'auditado', 'nauditado' ou 'todos'"
+            )
+        
+        # Validar se pelo menos um arquivo foi enviado
+        if not files or len(files) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Pelo menos um arquivo deve ser enviado"
+            )
+        
         bank_name = get_bank_name(bank_type)
         base_dir = f"arquivo_morto/{bank_type}"
+        filtragem_dir = "arquivo_morto/3026 - Filtragens"
+        
+        # Criar estrutura de pastas
+        os.makedirs(base_dir, exist_ok=True)
+        os.makedirs(filtragem_dir, exist_ok=True)
         
         # Estruturas para consolidar dados
         all_contratos = []
@@ -192,10 +212,15 @@ async def process_contratos(files: List[UploadFile], bank_type: str) -> Streamin
                 if len(df_repetidos) > 0:
                     contratos_repetidos.append(df_repetidos)
                 
-                # Salvar arquivo processado
+                # Salvar arquivo processado na pasta do banco
                 filename = f"{file_type} - {bank_name} - {total_unicos} (CONTRATOS).xlsx"
                 filepath = os.path.join(base_dir, filename)
                 save_processed_file(df_processado, filepath)
+                
+                # Se tiver coluna AUDITADO, salvar também na pasta de filtragens
+                if 'AUDITADO' in df_processado.columns:
+                    filepath_filtragem = os.path.join(filtragem_dir, filename)
+                    save_processed_file(df_processado, filepath_filtragem)
                 
                 # Adicionar ao resumo
                 resumo_geral.append({
@@ -215,7 +240,16 @@ async def process_contratos(files: List[UploadFile], bank_type: str) -> Streamin
                 # Processar 3026-12
                 resultados = process_3026_12(df, bank_name)
                 
-                for tipo_aud in ['aud', 'naud']:
+                # Determinar quais tipos processar baseado no filter_type
+                tipos_processar = []
+                if filter_type == 'auditado':
+                    tipos_processar = ['aud']
+                elif filter_type == 'nauditado':
+                    tipos_processar = ['naud']
+                else:  # todos
+                    tipos_processar = ['aud', 'naud']
+                
+                for tipo_aud in tipos_processar:
                     df_processado, total_linhas, total_unicos, total_duplicados = resultados[tipo_aud]
                     
                     # Adicionar colunas
@@ -232,11 +266,16 @@ async def process_contratos(files: List[UploadFile], bank_type: str) -> Streamin
                     if len(df_repetidos) > 0:
                         contratos_repetidos.append(df_repetidos)
                     
-                    # Salvar arquivo processado
+                    # Salvar arquivo processado na pasta do banco
                     tipo_nome = 'AUD' if tipo_aud == 'aud' else 'NAUD'
                     filename = f"3026-12 - {bank_name} - {tipo_nome} - {total_unicos} (CONTRATOS).xlsx"
                     filepath = os.path.join(base_dir, filename)
                     save_processed_file(df_processado, filepath)
+                    
+                    # Salvar também na pasta de filtragens
+                    filename_filtragem = f"3026-12 - {bank_name} - {tipo_nome} - {total_unicos} (CONTRATOS).xlsx"
+                    filepath_filtragem = os.path.join(filtragem_dir, filename_filtragem)
+                    save_processed_file(df_processado, filepath_filtragem)
                     
                     # Adicionar ao resumo
                     resumo_geral.append({
@@ -261,9 +300,37 @@ async def process_contratos(files: List[UploadFile], bank_type: str) -> Streamin
         
         df_all_contratos = pd.concat(all_contratos, ignore_index=True)
         
+        # Aplicar filtro final baseado em filter_type (para arquivos que não são 3026-12)
+        if filter_type != 'todos':
+            # Verificar se tem coluna AUDITADO ou AUDITADO_TIPO
+            if 'AUDITADO_TIPO' in df_all_contratos.columns:
+                if filter_type == 'auditado':
+                    df_all_contratos = df_all_contratos[df_all_contratos['AUDITADO_TIPO'] == 'AUD'].copy()
+                elif filter_type == 'nauditado':
+                    df_all_contratos = df_all_contratos[df_all_contratos['AUDITADO_TIPO'] == 'NAUD'].copy()
+            elif 'AUDITADO' in df_all_contratos.columns:
+                df_all_contratos['AUDITADO'] = df_all_contratos['AUDITADO'].astype(str).str.upper().str.strip()
+                if filter_type == 'auditado':
+                    df_all_contratos = df_all_contratos[df_all_contratos['AUDITADO'] == 'AUDI'].copy()
+                elif filter_type == 'nauditado':
+                    df_all_contratos = df_all_contratos[df_all_contratos['AUDITADO'] == 'NAUD'].copy()
+        
         # Criar DataFrame de contratos repetidos
         if contratos_repetidos:
             df_repetidos = pd.concat(contratos_repetidos, ignore_index=True)
+            # Aplicar filtro também nos repetidos
+            if filter_type != 'todos':
+                if 'AUDITADO_TIPO' in df_repetidos.columns:
+                    if filter_type == 'auditado':
+                        df_repetidos = df_repetidos[df_repetidos['AUDITADO_TIPO'] == 'AUD'].copy()
+                    elif filter_type == 'nauditado':
+                        df_repetidos = df_repetidos[df_repetidos['AUDITADO_TIPO'] == 'NAUD'].copy()
+                elif 'AUDITADO' in df_repetidos.columns:
+                    df_repetidos['AUDITADO'] = df_repetidos['AUDITADO'].astype(str).str.upper().str.strip()
+                    if filter_type == 'auditado':
+                        df_repetidos = df_repetidos[df_repetidos['AUDITADO'] == 'AUDI'].copy()
+                    elif filter_type == 'nauditado':
+                        df_repetidos = df_repetidos[df_repetidos['AUDITADO'] == 'NAUD'].copy()
         else:
             df_repetidos = pd.DataFrame()
         
