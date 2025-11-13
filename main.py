@@ -1,7 +1,9 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from typing import List
 import pandas as pd
 import io
+from app.services.process_contratos import process_contratos
 
 app = FastAPI()
 
@@ -30,3 +32,28 @@ async def processar_excel(file: UploadFile = File(...)):
         }
     except Exception as e:
         return {"erro": str(e)}
+
+@app.post("/processar_contratos/")
+async def processar_contratos_endpoint(
+    bank_type: str = Form(...),
+    files: List[UploadFile] = File(...)
+):
+    """
+    Processa múltiplas planilhas Excel de contratos.
+    
+    Recebe:
+    - bank_type: "bemge" ou "minas_caixa" (Form)
+    - files: Lista de arquivos Excel (File)
+    
+    Retorna:
+    - Arquivo Excel consolidado (.xlsx) como StreamingResponse
+    """
+    try:
+        return await process_contratos(files, bank_type)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao processar contratos: {str(e)}"
+        )
