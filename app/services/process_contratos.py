@@ -77,8 +77,8 @@ def process_3026_12(df: pd.DataFrame, bank_name: str) -> dict:
             detail=f"Colunas não encontradas no arquivo 3026-12: {', '.join(missing_cols)}"
         )
     
-    # Verificar colunas de filtro
-    filter_cols = ['DESTINO DE PAGAMENTO', 'DESTINO DE COMPLEMENTO']
+    # Verificar colunas de filtro (nomes reais das colunas)
+    filter_cols = ['DEST.PAGAM', 'DEST.COMPLEM']
     has_filter_cols = any(col in df.columns for col in filter_cols)
     
     # Converter AUDITADO para string e normalizar
@@ -204,7 +204,7 @@ async def process_contratos(files: List[UploadFile], bank_type: str, filter_type
                 # Identificar duplicados
                 df_processado['DUPLICADO'] = df_processado['CONTRATO'].duplicated(keep=False)
                 
-                # Adicionar aos consolidados
+                # Adicionar aos consolidados (mantém TODAS as 60+ colunas originais)
                 all_contratos.append(df_processado)
                 
                 # Contratos repetidos
@@ -258,7 +258,7 @@ async def process_contratos(files: List[UploadFile], bank_type: str, filter_type
                     df_processado['BANCO'] = bank_name
                     df_processado['DUPLICADO'] = df_processado['CONTRATO'].duplicated(keep=False)
                     
-                    # Adicionar aos consolidados
+                    # Adicionar aos consolidados (mantém TODAS as 60+ colunas originais)
                     all_contratos.append(df_processado)
                     
                     # Contratos repetidos
@@ -304,12 +304,15 @@ async def process_contratos(files: List[UploadFile], bank_type: str, filter_type
         if filter_type != 'todos':
             # Verificar se tem coluna AUDITADO ou AUDITADO_TIPO
             if 'AUDITADO_TIPO' in df_all_contratos.columns:
+                # AUDITADO_TIPO já vem como 'AUD' ou 'NAUD' do processamento 3026-12
                 if filter_type == 'auditado':
                     df_all_contratos = df_all_contratos[df_all_contratos['AUDITADO_TIPO'] == 'AUD'].copy()
                 elif filter_type == 'nauditado':
                     df_all_contratos = df_all_contratos[df_all_contratos['AUDITADO_TIPO'] == 'NAUD'].copy()
             elif 'AUDITADO' in df_all_contratos.columns:
+                # Converter para string e normalizar
                 df_all_contratos['AUDITADO'] = df_all_contratos['AUDITADO'].astype(str).str.upper().str.strip()
+                # Filtrar por "AUDI" (auditado) ou "NAUD" (não auditado)
                 if filter_type == 'auditado':
                     df_all_contratos = df_all_contratos[df_all_contratos['AUDITADO'] == 'AUDI'].copy()
                 elif filter_type == 'nauditado':
@@ -321,12 +324,15 @@ async def process_contratos(files: List[UploadFile], bank_type: str, filter_type
             # Aplicar filtro também nos repetidos
             if filter_type != 'todos':
                 if 'AUDITADO_TIPO' in df_repetidos.columns:
+                    # AUDITADO_TIPO já vem como 'AUD' ou 'NAUD' do processamento 3026-12
                     if filter_type == 'auditado':
                         df_repetidos = df_repetidos[df_repetidos['AUDITADO_TIPO'] == 'AUD'].copy()
                     elif filter_type == 'nauditado':
                         df_repetidos = df_repetidos[df_repetidos['AUDITADO_TIPO'] == 'NAUD'].copy()
                 elif 'AUDITADO' in df_repetidos.columns:
+                    # Converter para string e normalizar
                     df_repetidos['AUDITADO'] = df_repetidos['AUDITADO'].astype(str).str.upper().str.strip()
+                    # Filtrar por "AUDI" (auditado) ou "NAUD" (não auditado)
                     if filter_type == 'auditado':
                         df_repetidos = df_repetidos[df_repetidos['AUDITADO'] == 'AUDI'].copy()
                     elif filter_type == 'nauditado':
