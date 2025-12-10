@@ -2,9 +2,16 @@ import pandas as pd
 import io
 import os
 import re
+import logging
 from typing import List
+from pathlib import Path
 from fastapi import HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
+from openpyxl.utils import get_column_letter
+
+# Configurar logging para debug
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 
 def detect_file_type(filename: str) -> str:
@@ -35,16 +42,96 @@ def get_bank_name(bank_type: str) -> str:
     return bank_names.get(bank_type, bank_type.upper())
 
 
-def process_3026_11_15(df: pd.DataFrame, bank_name: str, file_type: str) -> tuple:
+def format_contrato_column(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Processa arquivos 3026-11 e 3026-15.
-    Retorna: (df_processado, total_linhas, total_unicos)
+    Formata a coluna CONTRATO como texto, preservando zeros à esquerda.
     """
+    if 'CONTRATO' in df.columns:
+        df['CONTRATO'] = df['CONTRATO'].apply(
+            lambda x: str(int(x)) if pd.notna(x) and isinstance(x, (int, float)) else str(x) if pd.notna(x) else ''
+        )
+    return df
+
+
+def format_column_d_as_text(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Formata a coluna D (índice 3) como texto.
+    """
+    if len(df.columns) > 3:
+        coluna_d = df.columns[3]
+        df[coluna_d] = df[coluna_d].apply(
+            lambda x: str(int(x)) if pd.notna(x) and isinstance(x, (int, float)) else str(x) if pd.notna(x) else ''
+        )
+    return df
+
+
+def format_date_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Formata colunas de data, removendo a hora.
+    Colunas afetadas: DT.ASS., DT.EVENTO, DT.HAB., DT.PROC.HAB.
+    """
+    colunas_data = ['DT.ASS.', 'DT.EVENTO', 'DT.HAB.', 'DT.PROC.HAB.']
+    for col in colunas_data:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
+    return df
+
+
+def remove_general_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove colunas AF, AG, AH (INDVAF3TR7, INDVAF4TR7, DT.ULT.HOMOLOGACAO).
+    """
+    colunas_remover_geral = ['INDVAF3TR7', 'INDVAF4TR7', 'DT.ULT.HOMOLOGACAO']
+    for col in colunas_remover_geral:
+        if col in df.columns:
+            df = df.drop(columns=[col])
+    return df
+
+
+def process_3026_11(df: pd.DataFrame, bank_name: str) -> tuple:
+    """
+    Processa arquivos 3026-11.
+    - Formata coluna D como texto
+    - Remove duplicados na coluna CONTRATO
+    Retorna: (df_processado, total_linhas, total_unicos, total_duplicados)
+    """
+    # Formatar coluna D como texto
+    df = format_column_d_as_text(df)
+    
     # Verificar se tem coluna CONTRATO
     if 'CONTRATO' not in df.columns:
         raise HTTPException(
             status_code=400,
-            detail=f"Coluna 'CONTRATO' não encontrada no arquivo {file_type}"
+            detail="Coluna 'CONTRATO' não encontrada no arquivo 3026-11"
+        )
+    
+    # Contar linhas antes de remover duplicados
+    total_linhas = len(df)
+    
+    # Remover duplicados na coluna CONTRATO (manter primeira ocorrência)
+    df_processado = df.drop_duplicates(subset=['CONTRATO'], keep='first').copy()
+    
+    total_unicos = len(df_processado)
+    total_duplicados = total_linhas - total_unicos
+    
+    return df_processado, total_linhas, total_unicos, total_duplicados
+
+
+def process_3026_15(df: pd.DataFrame, bank_name: str) -> tuple:
+    """
+    Processa arquivos 3026-15.
+    - Formata coluna D como texto
+    - Remove duplicados na coluna CONTRATO
+    Retorna: (df_processado, total_linhas, total_unicos, total_duplicados)
+    """
+    # Formatar coluna D como texto
+    df = format_column_d_as_text(df)
+    
+    # Verificar se tem coluna CONTRATO
+    if 'CONTRATO' not in df.columns:
+        raise HTTPException(
+            status_code=400,
+            detail="Coluna 'CONTRATO' não encontrada no arquivo 3026-15"
         )
     
     # Contar linhas antes de remover duplicados
@@ -62,12 +149,54 @@ def process_3026_11_15(df: pd.DataFrame, bank_name: str, file_type: str) -> tupl
 def process_3026_12(df: pd.DataFrame, bank_name: str) -> dict:
     """
     Processa arquivo 3026-12.
-    Separa em AUD e NAUD, aplica filtros.
+    - Coluna B: Manter apenas linhas onde = 52101
+    - Coluna D: Formatar como texto
+    - Colunas AA e AB: Deixar como número único (sem decimais)
+    - Remove colunas BT e BU
+    - Separa em AUD e NAUD, aplica filtros
     Retorna: {
         'aud': (df_aud, total_aud, unicos_aud, duplicados_aud),
         'naud': (df_naud, total_naud, unicos_naud, duplicados_naud)
     }
     """
+    logger.debug(f"Processando 3026-12 - Colunas originais: {len(df.columns)}")
+    
+    # 1. Coluna B - Manter apenas linhas onde = 52101
+    if len(df.columns) > 1:
+        coluna_b = df.columns[1]
+        logger.debug(f"Coluna B (índice 1): {coluna_b}")
+        df[coluna_b] = df[coluna_b].astype(str).str.strip()
+        linhas_antes = len(df)
+        df = df[df[coluna_b] == '52101'].copy()
+        linhas_depois = len(df)
+        logger.debug(f"Filtro coluna B=52101: {linhas_antes} -> {linhas_depois} linhas")
+    
+    # Se não sobrou nenhuma linha após o filtro
+    if len(df) == 0:
+        logger.warning("Nenhuma linha com valor 52101 encontrada na coluna B")
+        return {
+            'aud': (pd.DataFrame(), 0, 0, 0),
+            'naud': (pd.DataFrame(), 0, 0, 0)
+        }
+    
+    # 2. Formatar coluna D como texto
+    df = format_column_d_as_text(df)
+    
+    # 3. Colunas AA e AB - deixar como número único (sem decimais)
+    for idx in [26, 27]:  # AA=26, AB=27 (0-based)
+        if len(df.columns) > idx:
+            col = df.columns[idx]
+            logger.debug(f"Formatando coluna índice {idx} ({col}) como inteiro")
+            df[col] = df[col].apply(
+                lambda x: int(x) if pd.notna(x) and isinstance(x, (int, float)) else x
+            )
+    
+    # 4. Remover colunas BT e BU (índices 71 e 72, 0-based)
+    if len(df.columns) > 72:
+        colunas_bt_bu = df.columns[71:73].tolist()
+        logger.debug(f"Removendo colunas BT e BU: {colunas_bt_bu}")
+        df = df.drop(columns=colunas_bt_bu, errors='ignore')
+    
     # Verificar colunas necessárias
     required_cols = ['AUDITADO', 'CONTRATO']
     missing_cols = [col for col in required_cols if col not in df.columns]
@@ -87,6 +216,8 @@ def process_3026_12(df: pd.DataFrame, bank_name: str) -> dict:
     # Separar em AUD e NAUD
     df_aud = df[df['AUDITADO'] == 'AUDI'].copy()
     df_naud = df[df['AUDITADO'] == 'NAUD'].copy()
+    
+    logger.debug(f"Após separação: AUD={len(df_aud)}, NAUD={len(df_naud)}")
     
     # Aplicar filtros se as colunas existirem
     valores_filtro = ['0x0', '1x4', '6x4', '8x4']
@@ -119,22 +250,78 @@ def process_3026_12(df: pd.DataFrame, bank_name: str) -> dict:
     unicos_naud = len(df_naud_unicos)
     duplicados_naud = total_naud - unicos_naud
     
+    logger.debug(f"AUD: total={total_aud}, únicos={unicos_aud}, duplicados={duplicados_aud}")
+    logger.debug(f"NAUD: total={total_naud}, únicos={unicos_naud}, duplicados={duplicados_naud}")
+    
     return {
         'aud': (df_aud_unicos, total_aud, unicos_aud, duplicados_aud),
         'naud': (df_naud_unicos, total_naud, unicos_naud, duplicados_naud)
     }
 
 
-def save_processed_file(df: pd.DataFrame, filepath: str):
-    """Salva arquivo Excel processado"""
-    # Criar diretório se não existir
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+def apply_excel_formatting(writer, df: pd.DataFrame, sheet_name: str):
+    """
+    Aplica formatação no Excel:
+    - Colunas de data: formato DD/MM/YYYY
+    - Coluna CONTRATO: formato texto
+    """
+    worksheet = writer.sheets[sheet_name]
     
-    # Salvar arquivo
-    df.to_excel(filepath, index=False, engine='openpyxl')
+    # Lista de colunas de data
+    colunas_data = ['DT.ASS.', 'DT.EVENTO', 'DT.HAB.', 'DT.PROC.HAB.']
+    
+    # Formatar colunas de data
+    for col_name in colunas_data:
+        if col_name in df.columns:
+            col_idx = df.columns.get_loc(col_name) + 1
+            col_letter = get_column_letter(col_idx)
+            for row in range(2, len(df) + 2):
+                cell = worksheet[f"{col_letter}{row}"]
+                cell.number_format = 'DD/MM/YYYY'
+    
+    # Formatar coluna CONTRATO como texto
+    if 'CONTRATO' in df.columns:
+        col_idx = df.columns.get_loc('CONTRATO') + 1
+        col_letter = get_column_letter(col_idx)
+        for row in range(2, len(df) + 2):
+            cell = worksheet[f"{col_letter}{row}"]
+            cell.number_format = '@'
+    
+    # Formatar coluna D (índice 3) como texto se existir
+    if len(df.columns) > 3:
+        col_idx = 4  # Coluna D (1-based)
+        col_letter = get_column_letter(col_idx)
+        for row in range(2, len(df) + 2):
+            cell = worksheet[f"{col_letter}{row}"]
+            cell.number_format = '@'
 
 
-async def process_contratos(files: List[UploadFile], bank_type: str, filter_type: str = "todos") -> StreamingResponse:
+def save_processed_file(df: pd.DataFrame, filepath: str):
+    """Salva arquivo Excel processado com formatação"""
+    try:
+        # Criar diretório se não existir usando pathlib para melhor compatibilidade
+        filepath_obj = Path(filepath)
+        filepath_obj.parent.mkdir(parents=True, exist_ok=True)
+        
+        logger.debug(f"Salvando arquivo: {filepath}")
+        
+        # Salvar arquivo com formatação
+        with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name='Dados', index=False)
+            apply_excel_formatting(writer, df, 'Dados')
+        
+        # Verificar se arquivo foi salvo
+        if not filepath_obj.exists():
+            raise Exception(f"Arquivo não foi salvo: {filepath}")
+        
+        logger.debug(f"Arquivo salvo com sucesso: {filepath}")
+        
+    except Exception as e:
+        logger.error(f"Erro ao salvar arquivo {filepath}: {e}")
+        raise
+
+
+async def process_contratos(files: List[UploadFile], bank_type: str, filter_type: str = "todos", file_type: str = "todos") -> StreamingResponse:
     """
     Processa múltiplas planilhas Excel de contratos.
     
@@ -142,13 +329,18 @@ async def process_contratos(files: List[UploadFile], bank_type: str, filter_type
         files: Lista de arquivos Excel
         bank_type: "bemge" ou "minas_caixa"
         filter_type: "auditado", "nauditado" ou "todos"
+        file_type: "3026-11", "3026-12", "3026-15" ou "todos"
     
     Returns:
         StreamingResponse com arquivo Excel consolidado
     """
     try:
-        # Validar bank_type
-        if bank_type not in ['bemge', 'minas_caixa']:
+        logger.info(f"Iniciando processamento: bank_type={bank_type}, filter_type={filter_type}, file_type={file_type}")
+        logger.info(f"Arquivos recebidos: {[f.filename for f in files]}")
+        
+        # Validar bank_type - normalizar para snake_case
+        bank_type_normalized = bank_type.lower().replace(" ", "_")
+        if bank_type_normalized not in ['bemge', 'minas_caixa']:
             raise HTTPException(
                 status_code=400,
                 detail="bank_type deve ser 'bemge' ou 'minas_caixa'"
@@ -161,6 +353,13 @@ async def process_contratos(files: List[UploadFile], bank_type: str, filter_type
                 detail="filter_type deve ser 'auditado', 'nauditado' ou 'todos'"
             )
         
+        # Validar file_type
+        if file_type not in ['3026-11', '3026-12', '3026-15', 'todos']:
+            raise HTTPException(
+                status_code=400,
+                detail="file_type deve ser '3026-11', '3026-12', '3026-15' ou 'todos'"
+            )
+        
         # Validar se pelo menos um arquivo foi enviado
         if not files or len(files) == 0:
             raise HTTPException(
@@ -168,13 +367,21 @@ async def process_contratos(files: List[UploadFile], bank_type: str, filter_type
                 detail="Pelo menos um arquivo deve ser enviado"
             )
         
-        bank_name = get_bank_name(bank_type)
-        base_dir = f"arquivo_morto/{bank_type}"
-        filtragem_dir = "arquivo_morto/3026 - Filtragens"
+        bank_name = get_bank_name(bank_type_normalized)
+        
+        # Usar underscore em vez de espaços para nomes de pastas
+        bank_folder = bank_type_normalized.replace(" ", "_")
+        base_dir = Path(f"arquivo_morto/{bank_folder}")
+        filtragem_dir = Path("arquivo_morto/3026 - Filtragens")
         
         # Criar estrutura de pastas
-        os.makedirs(base_dir, exist_ok=True)
-        os.makedirs(filtragem_dir, exist_ok=True)
+        try:
+            base_dir.mkdir(parents=True, exist_ok=True)
+            filtragem_dir.mkdir(parents=True, exist_ok=True)
+            logger.debug(f"Pastas criadas: {base_dir}, {filtragem_dir}")
+        except Exception as e:
+            logger.error(f"Erro ao criar pastas: {e}")
+            raise HTTPException(status_code=500, detail=f"Erro ao criar pastas: {str(e)}")
         
         # Estruturas para consolidar dados
         all_contratos = []
@@ -184,27 +391,70 @@ async def process_contratos(files: List[UploadFile], bank_type: str, filter_type
         
         # Processar cada arquivo
         for file in files:
+            filename = file.filename
+            filename_upper = filename.upper()
+            
+            logger.debug(f"Processando arquivo: {filename}")
+            
+            # Filtrar por tipo de arquivo se especificado
+            if file_type != "todos":
+                file_type_normalized = file_type.upper().replace("-", "")
+                if file_type.upper() not in filename_upper and file_type_normalized not in filename_upper:
+                    logger.debug(f"Arquivo {filename} ignorado (não é {file_type})")
+                    continue
+            
             # Ler arquivo
-            contents = await file.read()
-            df = pd.read_excel(io.BytesIO(contents), engine='openpyxl')
+            try:
+                contents = await file.read()
+                df = pd.read_excel(io.BytesIO(contents), engine='openpyxl')
+                logger.debug(f"Arquivo lido: {len(df)} linhas, {len(df.columns)} colunas")
+            except Exception as e:
+                logger.error(f"Erro ao ler arquivo {filename}: {e}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Erro ao ler arquivo {filename}: {str(e)}"
+                )
+            
+            # ========================================
+            # FORMATAÇÃO DE DATAS (todas as planilhas)
+            # ========================================
+            df = format_date_columns(df)
+            
+            # ========================================
+            # REMOVER COLUNAS AF, AG, AH (geral)
+            # ========================================
+            df = remove_general_columns(df)
+            
+            # ========================================
+            # FORMATAÇÃO DA COLUNA CONTRATO (todas)
+            # ========================================
+            df = format_contrato_column(df)
             
             # Detectar tipo de arquivo
-            file_type = detect_file_type(file.filename)
+            detected_file_type = detect_file_type(filename)
             
-            if file_type in ['3026-11', '3026-15']:
-                # Processar 3026-11 ou 3026-15
-                df_processado, total_linhas, total_unicos, total_duplicados = process_3026_11_15(
-                    df, bank_name, file_type
+            if detected_file_type == '3026-11':
+                # Processar 3026-11
+                df_processado, total_linhas, total_unicos, total_duplicados = process_3026_11(
+                    df, bank_name
                 )
                 
                 # Adicionar coluna de tipo
-                df_processado['TIPO_ARQUIVO'] = file_type
+                df_processado['TIPO_ARQUIVO'] = '3026-11'
                 df_processado['BANCO'] = bank_name
                 
                 # Identificar duplicados
                 df_processado['DUPLICADO'] = df_processado['CONTRATO'].duplicated(keep=False)
                 
-                # Adicionar aos consolidados (mantém TODAS as 60+ colunas originais)
+                # Aplicar filtro de auditado se necessário
+                if filter_type != 'todos' and 'AUDITADO' in df_processado.columns:
+                    df_processado['AUDITADO'] = df_processado['AUDITADO'].astype(str).str.upper().str.strip()
+                    if filter_type == 'auditado':
+                        df_processado = df_processado[df_processado['AUDITADO'] == 'AUDI'].copy()
+                    elif filter_type == 'nauditado':
+                        df_processado = df_processado[df_processado['AUDITADO'] == 'NAUD'].copy()
+                
+                # Adicionar aos consolidados
                 all_contratos.append(df_processado)
                 
                 # Contratos repetidos
@@ -213,19 +463,19 @@ async def process_contratos(files: List[UploadFile], bank_type: str, filter_type
                     contratos_repetidos.append(df_repetidos)
                 
                 # Salvar arquivo processado na pasta do banco
-                filename = f"{file_type} - {bank_name} - {total_unicos} (CONTRATOS).xlsx"
-                filepath = os.path.join(base_dir, filename)
-                save_processed_file(df_processado, filepath)
+                save_filename = f"3026-11 - {bank_name} - {total_unicos} (CONTRATOS).xlsx"
+                save_filepath = base_dir / save_filename
+                save_processed_file(df_processado, str(save_filepath))
                 
                 # Se tiver coluna AUDITADO, salvar também na pasta de filtragens
                 if 'AUDITADO' in df_processado.columns:
-                    filepath_filtragem = os.path.join(filtragem_dir, filename)
-                    save_processed_file(df_processado, filepath_filtragem)
+                    filepath_filtragem = filtragem_dir / save_filename
+                    save_processed_file(df_processado, str(filepath_filtragem))
                 
                 # Adicionar ao resumo
                 resumo_geral.append({
-                    'ARQUIVO': file.filename,
-                    'TIPO': file_type,
+                    'ARQUIVO': filename,
+                    'TIPO': '3026-11',
                     'TOTAL_LINHAS': total_linhas,
                     'CONTRATOS_UNICOS': total_unicos,
                     'CONTRATOS_DUPLICADOS': total_duplicados,
@@ -236,7 +486,60 @@ async def process_contratos(files: List[UploadFile], bank_type: str, filter_type
                 df_banco = df_processado[['CONTRATO', 'TIPO_ARQUIVO', 'BANCO']].copy()
                 contratos_por_banco.append(df_banco)
             
-            elif file_type == '3026-12':
+            elif detected_file_type == '3026-15':
+                # Processar 3026-15
+                df_processado, total_linhas, total_unicos, total_duplicados = process_3026_15(
+                    df, bank_name
+                )
+                
+                # Adicionar coluna de tipo
+                df_processado['TIPO_ARQUIVO'] = '3026-15'
+                df_processado['BANCO'] = bank_name
+                
+                # Identificar duplicados
+                df_processado['DUPLICADO'] = df_processado['CONTRATO'].duplicated(keep=False)
+                
+                # Aplicar filtro de auditado se necessário
+                if filter_type != 'todos' and 'AUDITADO' in df_processado.columns:
+                    df_processado['AUDITADO'] = df_processado['AUDITADO'].astype(str).str.upper().str.strip()
+                    if filter_type == 'auditado':
+                        df_processado = df_processado[df_processado['AUDITADO'] == 'AUDI'].copy()
+                    elif filter_type == 'nauditado':
+                        df_processado = df_processado[df_processado['AUDITADO'] == 'NAUD'].copy()
+                
+                # Adicionar aos consolidados
+                all_contratos.append(df_processado)
+                
+                # Contratos repetidos
+                df_repetidos = df_processado[df_processado['DUPLICADO'] == True].copy()
+                if len(df_repetidos) > 0:
+                    contratos_repetidos.append(df_repetidos)
+                
+                # Salvar arquivo processado na pasta do banco
+                save_filename = f"3026-15 - {bank_name} - {total_unicos} (CONTRATOS).xlsx"
+                save_filepath = base_dir / save_filename
+                save_processed_file(df_processado, str(save_filepath))
+                
+                # Se tiver coluna AUDITADO, salvar também na pasta de filtragens
+                if 'AUDITADO' in df_processado.columns:
+                    filepath_filtragem = filtragem_dir / save_filename
+                    save_processed_file(df_processado, str(filepath_filtragem))
+                
+                # Adicionar ao resumo
+                resumo_geral.append({
+                    'ARQUIVO': filename,
+                    'TIPO': '3026-15',
+                    'TOTAL_LINHAS': total_linhas,
+                    'CONTRATOS_UNICOS': total_unicos,
+                    'CONTRATOS_DUPLICADOS': total_duplicados,
+                    'BANCO': bank_name
+                })
+                
+                # Adicionar aos contratos por banco
+                df_banco = df_processado[['CONTRATO', 'TIPO_ARQUIVO', 'BANCO']].copy()
+                contratos_por_banco.append(df_banco)
+            
+            elif detected_file_type == '3026-12':
                 # Processar 3026-12
                 resultados = process_3026_12(df, bank_name)
                 
@@ -252,13 +555,18 @@ async def process_contratos(files: List[UploadFile], bank_type: str, filter_type
                 for tipo_aud in tipos_processar:
                     df_processado, total_linhas, total_unicos, total_duplicados = resultados[tipo_aud]
                     
+                    # Pular se não houver dados
+                    if len(df_processado) == 0:
+                        logger.warning(f"Nenhum dado para 3026-12 {tipo_aud.upper()}")
+                        continue
+                    
                     # Adicionar colunas
                     df_processado['TIPO_ARQUIVO'] = '3026-12'
                     df_processado['AUDITADO_TIPO'] = tipo_aud.upper()
                     df_processado['BANCO'] = bank_name
                     df_processado['DUPLICADO'] = df_processado['CONTRATO'].duplicated(keep=False)
                     
-                    # Adicionar aos consolidados (mantém TODAS as 60+ colunas originais)
+                    # Adicionar aos consolidados
                     all_contratos.append(df_processado)
                     
                     # Contratos repetidos
@@ -268,18 +576,17 @@ async def process_contratos(files: List[UploadFile], bank_type: str, filter_type
                     
                     # Salvar arquivo processado na pasta do banco
                     tipo_nome = 'AUD' if tipo_aud == 'aud' else 'NAUD'
-                    filename = f"3026-12 - {bank_name} - {tipo_nome} - {total_unicos} (CONTRATOS).xlsx"
-                    filepath = os.path.join(base_dir, filename)
-                    save_processed_file(df_processado, filepath)
+                    save_filename = f"3026-12 - {bank_name} - {tipo_nome} - {total_unicos} (CONTRATOS).xlsx"
+                    save_filepath = base_dir / save_filename
+                    save_processed_file(df_processado, str(save_filepath))
                     
                     # Salvar também na pasta de filtragens
-                    filename_filtragem = f"3026-12 - {bank_name} - {tipo_nome} - {total_unicos} (CONTRATOS).xlsx"
-                    filepath_filtragem = os.path.join(filtragem_dir, filename_filtragem)
-                    save_processed_file(df_processado, filepath_filtragem)
+                    filepath_filtragem = filtragem_dir / save_filename
+                    save_processed_file(df_processado, str(filepath_filtragem))
                     
                     # Adicionar ao resumo
                     resumo_geral.append({
-                        'ARQUIVO': file.filename,
+                        'ARQUIVO': filename,
                         'TIPO': f'3026-12-{tipo_nome}',
                         'TOTAL_LINHAS': total_linhas,
                         'CONTRATOS_UNICOS': total_unicos,
@@ -299,6 +606,8 @@ async def process_contratos(files: List[UploadFile], bank_type: str, filter_type
             )
         
         df_all_contratos = pd.concat(all_contratos, ignore_index=True)
+        
+        logger.info(f"Total de contratos consolidados: {len(df_all_contratos)}")
         
         # Aplicar filtro final baseado em filter_type (para arquivos que não são 3026-12)
         if filter_type != 'todos':
@@ -324,15 +633,12 @@ async def process_contratos(files: List[UploadFile], bank_type: str, filter_type
             # Aplicar filtro também nos repetidos
             if filter_type != 'todos':
                 if 'AUDITADO_TIPO' in df_repetidos.columns:
-                    # AUDITADO_TIPO já vem como 'AUD' ou 'NAUD' do processamento 3026-12
                     if filter_type == 'auditado':
                         df_repetidos = df_repetidos[df_repetidos['AUDITADO_TIPO'] == 'AUD'].copy()
                     elif filter_type == 'nauditado':
                         df_repetidos = df_repetidos[df_repetidos['AUDITADO_TIPO'] == 'NAUD'].copy()
                 elif 'AUDITADO' in df_repetidos.columns:
-                    # Converter para string e normalizar
                     df_repetidos['AUDITADO'] = df_repetidos['AUDITADO'].astype(str).str.upper().str.strip()
-                    # Filtrar por "AUDI" (auditado) ou "NAUD" (não auditado)
                     if filter_type == 'auditado':
                         df_repetidos = df_repetidos[df_repetidos['AUDITADO'] == 'AUDI'].copy()
                     elif filter_type == 'nauditado':
@@ -394,10 +700,12 @@ async def process_contratos(files: List[UploadFile], bank_type: str, filter_type
             
             # Aba 2: Contratos Totais
             df_all_contratos.to_excel(writer, sheet_name='Contratos Totais', index=False)
+            apply_excel_formatting(writer, df_all_contratos, 'Contratos Totais')
             
             # Aba 3: Contratos Repetidos
             if not df_repetidos.empty:
                 df_repetidos.to_excel(writer, sheet_name='Contratos Repetidos', index=False)
+                apply_excel_formatting(writer, df_repetidos, 'Contratos Repetidos')
             else:
                 pd.DataFrame({'Mensagem': ['Nenhum contrato repetido encontrado']}).to_excel(
                     writer, sheet_name='Contratos Repetidos', index=False
@@ -416,20 +724,29 @@ async def process_contratos(files: List[UploadFile], bank_type: str, filter_type
         excel_data = output.read()
         output.close()
         
+        # Nome do arquivo de saída
+        filtro_nome = filter_type.upper()
+        banco_nome = "BEMGE" if bank_type_normalized == "bemge" else "MINAS_CAIXA"
+        tipo_nome = f"_{file_type}" if file_type != "todos" else ""
+        
+        filename_output = f"contratos{tipo_nome}_{banco_nome}_{filtro_nome}_consolidado.xlsx"
+        
+        logger.info(f"Processamento concluído. Arquivo: {filename_output}")
+        
         # Retornar como StreamingResponse
         return StreamingResponse(
             io.BytesIO(excel_data),
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={
-                "Content-Disposition": f"attachment; filename=contratos_consolidados_{bank_type}.xlsx"
+                "Content-Disposition": f"attachment; filename={filename_output}"
             }
         )
         
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Erro ao processar contratos: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Erro ao processar contratos: {str(e)}"
         )
-

@@ -37,6 +37,7 @@ async def processar_excel(file: UploadFile = File(...)):
 async def processar_contratos_endpoint(
     bank_type: str = Form(...),
     filter_type: str = Form(...),
+    file_type: str = Form("todos"),
     files: List[UploadFile] = File(...)
 ):
     """
@@ -45,13 +46,21 @@ async def processar_contratos_endpoint(
     Recebe:
     - bank_type: "bemge" ou "minas_caixa" (Form)
     - filter_type: "auditado", "nauditado" ou "todos" (Form)
+    - file_type: "3026-11", "3026-12", "3026-15" ou "todos" (Form) - NOVO
     - files: Lista de arquivos Excel (File)
     
     Retorna:
     - Arquivo Excel consolidado (.xlsx) como StreamingResponse
     """
+    # Validar file_type
+    if file_type not in ["3026-11", "3026-12", "3026-15", "todos"]:
+        raise HTTPException(
+            status_code=400,
+            detail="file_type deve ser '3026-11', '3026-12', '3026-15' ou 'todos'"
+        )
+    
     try:
-        return await process_contratos(files, bank_type, filter_type)
+        return await process_contratos(files, bank_type, filter_type, file_type)
     except HTTPException:
         raise
     except Exception as e:
