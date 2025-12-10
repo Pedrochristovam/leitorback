@@ -145,11 +145,28 @@ def remove_general_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def filter_last_2_months(df: pd.DataFrame, date_column: str = None) -> pd.DataFrame:
+def filter_by_period(
+    df: pd.DataFrame, 
+    reference_date: str = None, 
+    months_back: int = 2,
+    date_column: str = None
+) -> pd.DataFrame:
     """
-    Filtra contratos dos últimos 2 meses baseado na coluna de data de manifestação.
+    Filtra contratos por período baseado na coluna de data de manifestação.
     Coluna AG (índice 32) = DT.MANIFESTACAO
+    
+    Args:
+        df: DataFrame a ser filtrado
+        reference_date: Data de referência no formato "YYYY-MM-DD" (se None, usa data atual)
+        months_back: Número de meses para trás (padrão: 2)
+        date_column: Nome da coluna de data (opcional)
+    
+    Returns:
+        DataFrame filtrado
     """
+    if df.empty:
+        return df
+    
     # Tentar encontrar a coluna de data de manifestação
     possible_cols = ['DT.MANIFESTACAO', 'DT.MANIFESTAÇÃO', 'DATA MANIFESTACAO', 'DATA MANIFESTAÇÃO']
     
@@ -168,32 +185,49 @@ def filter_last_2_months(df: pd.DataFrame, date_column: str = None) -> pd.DataFr
             logger.debug(f"Usando coluna índice 32 para filtro de data: {col_manifestacao}")
     
     if col_manifestacao is None:
-        logger.warning("Coluna de data de manifestação não encontrada para filtro de 2 meses")
+        logger.warning("Coluna de data de manifestação não encontrada para filtro de período")
         return df
     
     try:
-        # Calcular data de 2 meses atrás
-        hoje = datetime.now().date()
-        dois_meses_atras = hoje - relativedelta(months=2)
+        # Determinar data de referência
+        if reference_date:
+            try:
+                data_ref = datetime.strptime(reference_date, "%Y-%m-%d").date()
+            except ValueError:
+                logger.error(f"Formato de data inválido: {reference_date}. Esperado: YYYY-MM-DD")
+                data_ref = datetime.now().date()
+        else:
+            data_ref = datetime.now().date()
         
-        logger.debug(f"Filtrando contratos a partir de {dois_meses_atras}")
+        # Calcular data de corte
+        data_corte = data_ref - relativedelta(months=months_back)
+        
+        logger.debug(f"Filtrando contratos: data_ref={data_ref}, months_back={months_back}, data_corte={data_corte}")
         
         # Converter coluna para datetime se ainda não estiver
         df_temp = df.copy()
         if df_temp[col_manifestacao].dtype == 'object' or not hasattr(df_temp[col_manifestacao].iloc[0] if len(df_temp) > 0 else None, 'year'):
             df_temp[col_manifestacao] = pd.to_datetime(df_temp[col_manifestacao], errors='coerce')
         
-        # Filtrar últimos 2 meses
-        mask = df_temp[col_manifestacao] >= pd.Timestamp(dois_meses_atras)
+        # Filtrar pelo período
+        mask = df_temp[col_manifestacao] >= pd.Timestamp(data_corte)
         df_filtrado = df[mask].copy()
         
-        logger.debug(f"Filtro últimos 2 meses: {len(df)} -> {len(df_filtrado)} linhas")
+        logger.debug(f"Filtro de período ({months_back} meses): {len(df)} -> {len(df_filtrado)} linhas")
         
         return df_filtrado
         
     except Exception as e:
-        logger.error(f"Erro ao filtrar últimos 2 meses: {e}")
+        logger.error(f"Erro ao filtrar por período: {e}")
         return df
+
+
+def filter_last_2_months(df: pd.DataFrame, date_column: str = None) -> pd.DataFrame:
+    """
+    Filtra contratos dos últimos 2 meses baseado na coluna de data de manifestação.
+    Função de compatibilidade - usa filter_by_period internamente.
+    """
+    return filter_by_period(df, reference_date=None, months_back=2, date_column=date_column)
 
 
 def process_3026_11(df: pd.DataFrame, bank_name: str) -> tuple:
@@ -605,7 +639,9 @@ async def process_contratos(
     bank_type: str, 
     filter_type: str = "todos", 
     file_type: str = "todos",
-    period_filter: str = "todos"
+    period_filter_enabled: str = "false",
+    reference_date: str = None,
+    months_back: int = 2
 ) -> StreamingResponse:
     """
     Processa múltiplas planilhas Excel de contratos.
@@ -615,13 +651,16 @@ async def process_contratos(
         bank_type: "bemge" ou "minas_caixa"
         filter_type: "auditado", "nauditado" ou "todos"
         file_type: "3026-11", "3026-12", "3026-15" ou "todos"
-        period_filter: "todos" ou "ultimos_2_meses"
+        period_filter_enabled: "true" ou "false" - Ativa filtro de período
+        reference_date: Data de referência no formato "YYYY-MM-DD"
+        months_back: Número de meses para trás (1, 2, 3, 4, 5, 6 ou 12)
     
     Returns:
         StreamingResponse com arquivo Excel consolidado
     """
     try:
-        logger.info(f"Iniciando processamento: bank_type={bank_type}, filter_type={filter_type}, file_type={file_type}, period_filter={period_filter}")
+        logger.info(f"Iniciando processamento: bank_type={bank_type}, filter_type={filter_type}, file_type={file_type}")
+        logger.info(f"Filtro de período: enabled={period_filter_enabled}, reference_date={reference_date}, months_back={months_back}")
         logger.info(f"Arquivos recebidos: {[f.filename for f in files]}")
         
         # Validar bank_type
@@ -646,12 +685,15 @@ async def process_contratos(
                 detail="file_type deve ser '3026-11', '3026-12', '3026-15' ou 'todos'"
             )
         
-        # Validar period_filter
-        if period_filter not in ['todos', 'ultimos_2_meses']:
+        # Validar period_filter_enabled
+        if period_filter_enabled not in ['true', 'false']:
             raise HTTPException(
                 status_code=400,
-                detail="period_filter deve ser 'todos' ou 'ultimos_2_meses'"
+                detail="period_filter_enabled deve ser 'true' ou 'false'"
             )
+        
+        # Converter para booleano
+        period_filter_active = period_filter_enabled == "true"
         
         # Validar se pelo menos um arquivo foi enviado
         if not files or len(files) == 0:
@@ -751,16 +793,16 @@ async def process_contratos(
                         df_processado = df_processado[df_processado['AUDITADO'].isin(['NAUD', 'NAO AUDITADO', 'NAUDITADO'])].copy()
                 
                 # Aplicar filtro de período se necessário
-                if period_filter == 'ultimos_2_meses':
-                    df_processado = filter_last_2_months(df_processado)
+                if period_filter_active:
+                    df_processado = filter_by_period(df_processado, reference_date, months_back)
                 
                 all_contratos.append(df_processado)
                 dados_por_aba['3026-11'].append(df_processado.copy())
                 
-                # Adicionar aos últimos 2 meses
-                df_2_meses = filter_last_2_months(df_processado)
-                if not df_2_meses.empty:
-                    dados_ultimos_2_meses.append(df_2_meses.copy())
+                # Adicionar aos últimos N meses (para aba separada)
+                df_filtrado_periodo = filter_by_period(df_processado, reference_date, months_back)
+                if not df_filtrado_periodo.empty:
+                    dados_ultimos_2_meses.append(df_filtrado_periodo.copy())
                 
                 # Contratos repetidos
                 df_repetidos = df_processado[df_processado['DUPLICADO'] == True].copy()
@@ -807,16 +849,16 @@ async def process_contratos(
                         df_processado = df_processado[df_processado['AUDITADO'].isin(['NAUD', 'NAO AUDITADO', 'NAUDITADO'])].copy()
                 
                 # Aplicar filtro de período se necessário
-                if period_filter == 'ultimos_2_meses':
-                    df_processado = filter_last_2_months(df_processado)
+                if period_filter_active:
+                    df_processado = filter_by_period(df_processado, reference_date, months_back)
                 
                 all_contratos.append(df_processado)
                 dados_por_aba['3026-15'].append(df_processado.copy())
                 
-                # Adicionar aos últimos 2 meses
-                df_2_meses = filter_last_2_months(df_processado)
-                if not df_2_meses.empty:
-                    dados_ultimos_2_meses.append(df_2_meses.copy())
+                # Adicionar aos últimos N meses (para aba separada)
+                df_filtrado_periodo = filter_by_period(df_processado, reference_date, months_back)
+                if not df_filtrado_periodo.empty:
+                    dados_ultimos_2_meses.append(df_filtrado_periodo.copy())
                 
                 # Contratos repetidos
                 df_repetidos = df_processado[df_processado['DUPLICADO'] == True].copy()
@@ -870,8 +912,8 @@ async def process_contratos(
                     df_processado['DUPLICADO'] = df_processado['CONTRATO'].duplicated(keep=False)
                     
                     # Aplicar filtro de período se necessário
-                    if period_filter == 'ultimos_2_meses':
-                        df_processado = filter_last_2_months(df_processado)
+                    if period_filter_active:
+                        df_processado = filter_by_period(df_processado, reference_date, months_back)
                     
                     all_contratos.append(df_processado)
                     
@@ -879,10 +921,10 @@ async def process_contratos(
                     if aba_nome in dados_por_aba:
                         dados_por_aba[aba_nome].append(df_processado.copy())
                     
-                    # Adicionar aos últimos 2 meses
-                    df_2_meses = filter_last_2_months(df_processado)
-                    if not df_2_meses.empty:
-                        dados_ultimos_2_meses.append(df_2_meses.copy())
+                    # Adicionar aos últimos N meses (para aba separada)
+                    df_filtrado_periodo = filter_by_period(df_processado, reference_date, months_back)
+                    if not df_filtrado_periodo.empty:
+                        dados_ultimos_2_meses.append(df_filtrado_periodo.copy())
                     
                     # Contratos repetidos
                     df_repetidos = df_processado[df_processado['DUPLICADO'] == True].copy()
@@ -1027,13 +1069,14 @@ async def process_contratos(
                 df_3026_15.to_excel(writer, sheet_name=nome_aba_15, index=False)
                 apply_excel_formatting(writer, df_3026_15, nome_aba_15)
             
-            # Aba: Últimos 2 Meses
+            # Aba: Últimos N Meses (baseado no período selecionado)
+            nome_aba_periodo = f'Últimos {months_back} Meses'[:31]  # Limitar a 31 caracteres
             if not df_ultimos_2_meses.empty:
-                df_ultimos_2_meses.to_excel(writer, sheet_name='Últimos 2 Meses', index=False)
-                apply_excel_formatting(writer, df_ultimos_2_meses, 'Últimos 2 Meses')
+                df_ultimos_2_meses.to_excel(writer, sheet_name=nome_aba_periodo, index=False)
+                apply_excel_formatting(writer, df_ultimos_2_meses, nome_aba_periodo)
             else:
-                pd.DataFrame({'Mensagem': ['Nenhum contrato encontrado nos últimos 2 meses']}).to_excel(
-                    writer, sheet_name='Últimos 2 Meses', index=False
+                pd.DataFrame({'Mensagem': [f'Nenhum contrato encontrado nos últimos {months_back} meses']}).to_excel(
+                    writer, sheet_name=nome_aba_periodo, index=False
                 )
             
             # Aba: Todos os Contratos
@@ -1059,7 +1102,7 @@ async def process_contratos(
         filtro_nome = filter_type.upper()
         banco_nome = "BEMGE" if bank_type_normalized == "bemge" else "MINAS_CAIXA"
         tipo_nome = f"_{file_type}" if file_type != "todos" else ""
-        periodo_nome = "_2MESES" if period_filter == "ultimos_2_meses" else ""
+        periodo_nome = f"_{months_back}MESES" if period_filter_active else ""
         
         filename_output = f"contratos{tipo_nome}_{banco_nome}_{filtro_nome}{periodo_nome}_consolidado.xlsx"
         
