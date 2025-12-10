@@ -38,6 +38,7 @@ async def processar_contratos_endpoint(
     bank_type: str = Form(...),
     filter_type: str = Form(...),
     file_type: str = Form("todos"),
+    period_filter: str = Form("todos"),
     files: List[UploadFile] = File(...)
 ):
     """
@@ -46,7 +47,8 @@ async def processar_contratos_endpoint(
     Recebe:
     - bank_type: "bemge" ou "minas_caixa" (Form)
     - filter_type: "auditado", "nauditado" ou "todos" (Form)
-    - file_type: "3026-11", "3026-12", "3026-15" ou "todos" (Form) - NOVO
+    - file_type: "3026-11", "3026-12", "3026-15" ou "todos" (Form)
+    - period_filter: "todos" ou "ultimos_2_meses" (Form) - NOVO
     - files: Lista de arquivos Excel (File)
     
     Retorna:
@@ -59,8 +61,15 @@ async def processar_contratos_endpoint(
             detail="file_type deve ser '3026-11', '3026-12', '3026-15' ou 'todos'"
         )
     
+    # Validar period_filter
+    if period_filter not in ["todos", "ultimos_2_meses"]:
+        raise HTTPException(
+            status_code=400,
+            detail="period_filter deve ser 'todos' ou 'ultimos_2_meses'"
+        )
+    
     try:
-        return await process_contratos(files, bank_type, filter_type, file_type)
+        return await process_contratos(files, bank_type, filter_type, file_type, period_filter)
     except HTTPException:
         raise
     except Exception as e:
