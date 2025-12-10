@@ -68,12 +68,27 @@ def format_column_d_as_text(df: pd.DataFrame) -> pd.DataFrame:
 def format_date_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     Formata colunas de data, removendo a hora.
-    Colunas afetadas: DT.ASS., DT.EVENTO, DT.HAB., DT.PROC.HAB.
+    Colunas afetadas: DT.ASS., DT.EVENTO, DT.HAB., DT.PROC.HAB. e variações
     """
-    colunas_data = ['DT.ASS.', 'DT.EVENTO', 'DT.HAB.', 'DT.PROC.HAB.']
-    for col in colunas_data:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
+    # Lista de possíveis nomes de colunas de data
+    colunas_data = [
+        'DT.ASS.', 'DT.EVENTO', 'DT.HAB.', 'DT.PROC.HAB.',
+        'DT.ASS', 'DT.EVENTO', 'DT.HAB', 'DT.PROC.HAB',
+        'DATA ASS.', 'DATA EVENTO', 'DATA HAB.', 'DATA PROC.HAB.',
+        'DT.BASE', 'DT.TERM.ANALISE', 'DT.MANIFESTACAO', 'DT.POS.NOVACAO',
+        'DT.ULT.AUDITORIA', 'DT.ULT.NEGOCIACAO', 'DATA STATUS'
+    ]
+    
+    for col in df.columns:
+        # Verificar se a coluna está na lista ou começa com DT. ou DATA
+        if col in colunas_data or col.upper().startswith('DT.') or col.upper().startswith('DATA'):
+            try:
+                # Converter para datetime e extrair apenas a data
+                df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
+                logger.debug(f"Coluna de data formatada: {col}")
+            except Exception as e:
+                logger.warning(f"Erro ao formatar coluna de data {col}: {e}")
+    
     return df
 
 
@@ -95,15 +110,38 @@ def process_3026_11(df: pd.DataFrame, bank_name: str) -> tuple:
     - Remove duplicados na coluna CONTRATO
     Retorna: (df_processado, total_linhas, total_unicos, total_duplicados)
     """
+    logger.debug(f"Processando 3026-11 para {bank_name} - Linhas: {len(df)}, Colunas: {len(df.columns)}")
+    logger.debug(f"Colunas do 3026-11: {list(df.columns)[:10]}...")  # Primeiras 10 colunas
+    
+    # Verificar se DataFrame está vazio
+    if df.empty:
+        logger.warning(f"DataFrame 3026-11 está vazio para {bank_name}")
+        return pd.DataFrame(), 0, 0, 0
+    
+    # Fazer cópia para evitar problemas de referência
+    df = df.copy()
+    
     # Formatar coluna D como texto
     df = format_column_d_as_text(df)
     
-    # Verificar se tem coluna CONTRATO
-    if 'CONTRATO' not in df.columns:
+    # Verificar se tem coluna CONTRATO (tentar variações)
+    coluna_contrato = None
+    for nome in ['CONTRATO', 'CONTRATO_NUM', 'NUM_CONTRATO', 'NR_CONTRATO']:
+        if nome in df.columns:
+            coluna_contrato = nome
+            break
+    
+    if coluna_contrato is None:
+        logger.error(f"Coluna CONTRATO não encontrada. Colunas disponíveis: {list(df.columns)}")
         raise HTTPException(
             status_code=400,
             detail="Coluna 'CONTRATO' não encontrada no arquivo 3026-11"
         )
+    
+    # Renomear para CONTRATO se necessário
+    if coluna_contrato != 'CONTRATO':
+        df = df.rename(columns={coluna_contrato: 'CONTRATO'})
+        logger.debug(f"Coluna {coluna_contrato} renomeada para CONTRATO")
     
     # Contar linhas antes de remover duplicados
     total_linhas = len(df)
@@ -113,6 +151,8 @@ def process_3026_11(df: pd.DataFrame, bank_name: str) -> tuple:
     
     total_unicos = len(df_processado)
     total_duplicados = total_linhas - total_unicos
+    
+    logger.debug(f"3026-11 processado: total={total_linhas}, únicos={total_unicos}, duplicados={total_duplicados}")
     
     return df_processado, total_linhas, total_unicos, total_duplicados
 
@@ -124,15 +164,38 @@ def process_3026_15(df: pd.DataFrame, bank_name: str) -> tuple:
     - Remove duplicados na coluna CONTRATO
     Retorna: (df_processado, total_linhas, total_unicos, total_duplicados)
     """
+    logger.debug(f"Processando 3026-15 para {bank_name} - Linhas: {len(df)}, Colunas: {len(df.columns)}")
+    logger.debug(f"Colunas do 3026-15: {list(df.columns)[:10]}...")  # Primeiras 10 colunas
+    
+    # Verificar se DataFrame está vazio
+    if df.empty:
+        logger.warning(f"DataFrame 3026-15 está vazio para {bank_name}")
+        return pd.DataFrame(), 0, 0, 0
+    
+    # Fazer cópia para evitar problemas de referência
+    df = df.copy()
+    
     # Formatar coluna D como texto
     df = format_column_d_as_text(df)
     
-    # Verificar se tem coluna CONTRATO
-    if 'CONTRATO' not in df.columns:
+    # Verificar se tem coluna CONTRATO (tentar variações)
+    coluna_contrato = None
+    for nome in ['CONTRATO', 'CONTRATO_NUM', 'NUM_CONTRATO', 'NR_CONTRATO']:
+        if nome in df.columns:
+            coluna_contrato = nome
+            break
+    
+    if coluna_contrato is None:
+        logger.error(f"Coluna CONTRATO não encontrada. Colunas disponíveis: {list(df.columns)}")
         raise HTTPException(
             status_code=400,
             detail="Coluna 'CONTRATO' não encontrada no arquivo 3026-15"
         )
+    
+    # Renomear para CONTRATO se necessário
+    if coluna_contrato != 'CONTRATO':
+        df = df.rename(columns={coluna_contrato: 'CONTRATO'})
+        logger.debug(f"Coluna {coluna_contrato} renomeada para CONTRATO")
     
     # Contar linhas antes de remover duplicados
     total_linhas = len(df)
@@ -142,6 +205,8 @@ def process_3026_15(df: pd.DataFrame, bank_name: str) -> tuple:
     
     total_unicos = len(df_processado)
     total_duplicados = total_linhas - total_unicos
+    
+    logger.debug(f"3026-15 processado: total={total_linhas}, únicos={total_unicos}, duplicados={total_duplicados}")
     
     return df_processado, total_linhas, total_unicos, total_duplicados
 
@@ -159,21 +224,42 @@ def process_3026_12(df: pd.DataFrame, bank_name: str) -> dict:
         'naud': (df_naud, total_naud, unicos_naud, duplicados_naud)
     }
     """
-    logger.debug(f"Processando 3026-12 - Colunas originais: {len(df.columns)}")
+    logger.debug(f"Processando 3026-12 - Colunas originais: {len(df.columns)}, Linhas: {len(df)}")
+    
+    # Fazer cópia para evitar problemas de referência
+    df = df.copy()
     
     # 1. Coluna B - Manter apenas linhas onde = 52101
+    # NOTA: Aplicar filtro apenas se a coluna existir e tiver o valor esperado
     if len(df.columns) > 1:
         coluna_b = df.columns[1]
         logger.debug(f"Coluna B (índice 1): {coluna_b}")
-        df[coluna_b] = df[coluna_b].astype(str).str.strip()
+        # Converter para string, removendo .0 de números float
+        df[coluna_b] = df[coluna_b].apply(
+            lambda x: str(int(x)) if pd.notna(x) and isinstance(x, (int, float)) else str(x) if pd.notna(x) else ''
+        )
+        df[coluna_b] = df[coluna_b].str.strip()
         linhas_antes = len(df)
-        df = df[df[coluna_b] == '52101'].copy()
-        linhas_depois = len(df)
+        
+        # Verificar se existe o valor 52101
+        valores_unicos = df[coluna_b].unique()[:10]  # Primeiros 10 valores únicos
+        logger.debug(f"Valores únicos na coluna B (amostra): {valores_unicos}")
+        
+        # Filtrar por 52101
+        df_filtrado = df[df[coluna_b] == '52101'].copy()
+        linhas_depois = len(df_filtrado)
         logger.debug(f"Filtro coluna B=52101: {linhas_antes} -> {linhas_depois} linhas")
+        
+        # Se não encontrou nenhuma linha, continuar sem o filtro (pode ser formato diferente)
+        if linhas_depois == 0:
+            logger.warning(f"Nenhuma linha com valor 52101 encontrada. Continuando sem filtro da coluna B.")
+            # Não aplicar filtro, manter df original
+        else:
+            df = df_filtrado
     
-    # Se não sobrou nenhuma linha após o filtro
+    # Se não sobrou nenhuma linha
     if len(df) == 0:
-        logger.warning("Nenhuma linha com valor 52101 encontrada na coluna B")
+        logger.warning("DataFrame vazio após processamento inicial")
         return {
             'aud': (pd.DataFrame(), 0, 0, 0),
             'naud': (pd.DataFrame(), 0, 0, 0)
@@ -197,41 +283,69 @@ def process_3026_12(df: pd.DataFrame, bank_name: str) -> dict:
         logger.debug(f"Removendo colunas BT e BU: {colunas_bt_bu}")
         df = df.drop(columns=colunas_bt_bu, errors='ignore')
     
-    # Verificar colunas necessárias
-    required_cols = ['AUDITADO', 'CONTRATO']
-    missing_cols = [col for col in required_cols if col not in df.columns]
-    if missing_cols:
+    # Verificar coluna AUDITADO (tentar diferentes nomes)
+    coluna_auditado = None
+    for nome in ['AUDITADO', 'AUD', 'AUDIT']:
+        if nome in df.columns:
+            coluna_auditado = nome
+            break
+    
+    if coluna_auditado is None:
+        logger.error(f"Coluna AUDITADO não encontrada. Colunas disponíveis: {list(df.columns)}")
         raise HTTPException(
             status_code=400,
-            detail=f"Colunas não encontradas no arquivo 3026-12: {', '.join(missing_cols)}"
+            detail=f"Coluna 'AUDITADO' não encontrada no arquivo 3026-12"
         )
+    
+    # Verificar coluna CONTRATO (tentar variações)
+    coluna_contrato = None
+    for nome in ['CONTRATO', 'CONTRATO_NUM', 'NUM_CONTRATO', 'NR_CONTRATO']:
+        if nome in df.columns:
+            coluna_contrato = nome
+            break
+    
+    if coluna_contrato is None:
+        logger.error(f"Coluna CONTRATO não encontrada. Colunas disponíveis: {list(df.columns)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Coluna 'CONTRATO' não encontrada no arquivo 3026-12"
+        )
+    
+    # Renomear para CONTRATO se necessário
+    if coluna_contrato != 'CONTRATO':
+        df = df.rename(columns={coluna_contrato: 'CONTRATO'})
+        logger.debug(f"Coluna {coluna_contrato} renomeada para CONTRATO")
     
     # Verificar colunas de filtro (nomes reais das colunas)
     filter_cols = ['DEST.PAGAM', 'DEST.COMPLEM']
     has_filter_cols = any(col in df.columns for col in filter_cols)
     
     # Converter AUDITADO para string e normalizar
-    df['AUDITADO'] = df['AUDITADO'].astype(str).str.upper().str.strip()
+    df[coluna_auditado] = df[coluna_auditado].astype(str).str.upper().str.strip()
     
-    # Separar em AUD e NAUD
-    df_aud = df[df['AUDITADO'] == 'AUDI'].copy()
-    df_naud = df[df['AUDITADO'] == 'NAUD'].copy()
+    # Verificar valores únicos de AUDITADO
+    valores_auditado = df[coluna_auditado].unique()
+    logger.debug(f"Valores únicos de AUDITADO: {valores_auditado}")
+    
+    # Separar em AUD e NAUD (aceitar variações)
+    df_aud = df[df[coluna_auditado].isin(['AUDI', 'AUD', 'AUDITADO'])].copy()
+    df_naud = df[df[coluna_auditado].isin(['NAUD', 'NAO AUDITADO', 'NAUDITADO'])].copy()
     
     logger.debug(f"Após separação: AUD={len(df_aud)}, NAUD={len(df_naud)}")
     
     # Aplicar filtros se as colunas existirem
-    valores_filtro = ['0x0', '1x4', '6x4', '8x4']
+    valores_filtro = ['0X0', '1X4', '6X4', '8X4', '0x0', '1x4', '6x4', '8x4']
     
     if has_filter_cols:
         for col in filter_cols:
-            if col in df_aud.columns:
+            if col in df_aud.columns and len(df_aud) > 0:
                 # Converter para string e normalizar
                 df_aud[col] = df_aud[col].astype(str).str.upper().str.strip()
                 # Remover linhas com valores filtrados
                 mask = ~df_aud[col].isin(valores_filtro)
                 df_aud = df_aud[mask].copy()
             
-            if col in df_naud.columns:
+            if col in df_naud.columns and len(df_naud) > 0:
                 # Converter para string e normalizar
                 df_naud[col] = df_naud[col].astype(str).str.upper().str.strip()
                 # Remover linhas com valores filtrados
@@ -240,14 +354,22 @@ def process_3026_12(df: pd.DataFrame, bank_name: str) -> dict:
     
     # Processar AUD
     total_aud = len(df_aud)
-    df_aud_unicos = df_aud.drop_duplicates(subset=['CONTRATO'], keep='first')
-    unicos_aud = len(df_aud_unicos)
+    if total_aud > 0:
+        df_aud_unicos = df_aud.drop_duplicates(subset=['CONTRATO'], keep='first')
+        unicos_aud = len(df_aud_unicos)
+    else:
+        df_aud_unicos = pd.DataFrame()
+        unicos_aud = 0
     duplicados_aud = total_aud - unicos_aud
     
     # Processar NAUD
     total_naud = len(df_naud)
-    df_naud_unicos = df_naud.drop_duplicates(subset=['CONTRATO'], keep='first')
-    unicos_naud = len(df_naud_unicos)
+    if total_naud > 0:
+        df_naud_unicos = df_naud.drop_duplicates(subset=['CONTRATO'], keep='first')
+        unicos_naud = len(df_naud_unicos)
+    else:
+        df_naud_unicos = pd.DataFrame()
+        unicos_naud = 0
     duplicados_naud = total_naud - unicos_naud
     
     logger.debug(f"AUD: total={total_aud}, únicos={unicos_aud}, duplicados={duplicados_aud}")
@@ -267,17 +389,33 @@ def apply_excel_formatting(writer, df: pd.DataFrame, sheet_name: str):
     """
     worksheet = writer.sheets[sheet_name]
     
-    # Lista de colunas de data
-    colunas_data = ['DT.ASS.', 'DT.EVENTO', 'DT.HAB.', 'DT.PROC.HAB.']
+    # Lista de possíveis nomes de colunas de data
+    colunas_data_conhecidas = [
+        'DT.ASS.', 'DT.EVENTO', 'DT.HAB.', 'DT.PROC.HAB.',
+        'DT.ASS', 'DT.EVENTO', 'DT.HAB', 'DT.PROC.HAB',
+        'DATA ASS.', 'DATA EVENTO', 'DATA HAB.', 'DATA PROC.HAB.',
+        'DT.BASE', 'DT.TERM.ANALISE', 'DT.MANIFESTACAO', 'DT.POS.NOVACAO',
+        'DT.ULT.AUDITORIA', 'DT.ULT.NEGOCIACAO', 'DATA STATUS'
+    ]
     
-    # Formatar colunas de data
-    for col_name in colunas_data:
-        if col_name in df.columns:
-            col_idx = df.columns.get_loc(col_name) + 1
-            col_letter = get_column_letter(col_idx)
-            for row in range(2, len(df) + 2):
-                cell = worksheet[f"{col_letter}{row}"]
-                cell.number_format = 'DD/MM/YYYY'
+    # Formatar TODAS as colunas de data (detectar por nome)
+    for col_name in df.columns:
+        # Verificar se é coluna de data (pela lista ou pelo prefixo)
+        is_date_col = (
+            col_name in colunas_data_conhecidas or 
+            col_name.upper().startswith('DT.') or 
+            col_name.upper().startswith('DATA')
+        )
+        
+        if is_date_col:
+            try:
+                col_idx = df.columns.get_loc(col_name) + 1
+                col_letter = get_column_letter(col_idx)
+                for row in range(2, len(df) + 2):
+                    cell = worksheet[f"{col_letter}{row}"]
+                    cell.number_format = 'DD/MM/YYYY'
+            except Exception as e:
+                logger.warning(f"Erro ao formatar coluna de data {col_name}: {e}")
     
     # Formatar coluna CONTRATO como texto
     if 'CONTRATO' in df.columns:
@@ -389,6 +527,14 @@ async def process_contratos(files: List[UploadFile], bank_type: str, filter_type
         resumo_geral = []
         contratos_por_banco = []
         
+        # Estruturas para separar por abas
+        dados_por_aba = {
+            '3026-11': [],
+            '3026-12 AUD': [],
+            '3026-12 NAUD': [],
+            '3026-15': []
+        }
+        
         # Processar cada arquivo
         for file in files:
             filename = file.filename
@@ -457,6 +603,9 @@ async def process_contratos(files: List[UploadFile], bank_type: str, filter_type
                 # Adicionar aos consolidados
                 all_contratos.append(df_processado)
                 
+                # Adicionar à aba específica 3026-11
+                dados_por_aba['3026-11'].append(df_processado.copy())
+                
                 # Contratos repetidos
                 df_repetidos = df_processado[df_processado['DUPLICADO'] == True].copy()
                 if len(df_repetidos) > 0:
@@ -509,6 +658,9 @@ async def process_contratos(files: List[UploadFile], bank_type: str, filter_type
                 
                 # Adicionar aos consolidados
                 all_contratos.append(df_processado)
+                
+                # Adicionar à aba específica 3026-15
+                dados_por_aba['3026-15'].append(df_processado.copy())
                 
                 # Contratos repetidos
                 df_repetidos = df_processado[df_processado['DUPLICADO'] == True].copy()
@@ -568,6 +720,11 @@ async def process_contratos(files: List[UploadFile], bank_type: str, filter_type
                     
                     # Adicionar aos consolidados
                     all_contratos.append(df_processado)
+                    
+                    # Adicionar à aba específica 3026-12 AUD ou NAUD
+                    aba_nome = f"3026-12 {tipo_aud.upper()}"
+                    if aba_nome in dados_por_aba:
+                        dados_por_aba[aba_nome].append(df_processado.copy())
                     
                     # Contratos repetidos
                     df_repetidos = df_processado[df_processado['DUPLICADO'] == True].copy()
@@ -691,32 +848,50 @@ async def process_contratos(files: List[UploadFile], bank_type: str, filter_type
         else:
             df_por_banco = pd.DataFrame(columns=['BANCO', 'TIPO_ARQUIVO', 'TOTAL_CONTRATOS'])
         
-        # Criar arquivo Excel consolidado
+        # Criar arquivo Excel consolidado com abas separadas por tipo
         output = io.BytesIO()
         
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             # Aba 1: Resumo Geral
             df_resumo.to_excel(writer, sheet_name='Resumo Geral', index=False)
             
-            # Aba 2: Contratos Totais
-            df_all_contratos.to_excel(writer, sheet_name='Contratos Totais', index=False)
-            apply_excel_formatting(writer, df_all_contratos, 'Contratos Totais')
+            # Abas separadas por tipo de arquivo
+            # 3026-11
+            if dados_por_aba['3026-11']:
+                df_3026_11 = pd.concat(dados_por_aba['3026-11'], ignore_index=True)
+                df_3026_11.to_excel(writer, sheet_name='3026-11', index=False)
+                apply_excel_formatting(writer, df_3026_11, '3026-11')
             
-            # Aba 3: Contratos Repetidos
+            # 3026-12 AUD
+            if dados_por_aba['3026-12 AUD']:
+                df_3026_12_aud = pd.concat(dados_por_aba['3026-12 AUD'], ignore_index=True)
+                df_3026_12_aud.to_excel(writer, sheet_name='3026-12 AUD', index=False)
+                apply_excel_formatting(writer, df_3026_12_aud, '3026-12 AUD')
+            
+            # 3026-12 NAUD
+            if dados_por_aba['3026-12 NAUD']:
+                df_3026_12_naud = pd.concat(dados_por_aba['3026-12 NAUD'], ignore_index=True)
+                df_3026_12_naud.to_excel(writer, sheet_name='3026-12 NAUD', index=False)
+                apply_excel_formatting(writer, df_3026_12_naud, '3026-12 NAUD')
+            
+            # 3026-15
+            if dados_por_aba['3026-15']:
+                df_3026_15 = pd.concat(dados_por_aba['3026-15'], ignore_index=True)
+                df_3026_15.to_excel(writer, sheet_name='3026-15', index=False)
+                apply_excel_formatting(writer, df_3026_15, '3026-15')
+            
+            # Aba: Todos os Contratos (consolidado)
+            if not df_all_contratos.empty:
+                df_all_contratos.to_excel(writer, sheet_name='Todos Contratos', index=False)
+                apply_excel_formatting(writer, df_all_contratos, 'Todos Contratos')
+            
+            # Aba: Contratos Repetidos
             if not df_repetidos.empty:
-                df_repetidos.to_excel(writer, sheet_name='Contratos Repetidos', index=False)
-                apply_excel_formatting(writer, df_repetidos, 'Contratos Repetidos')
+                df_repetidos.to_excel(writer, sheet_name='Repetidos', index=False)
+                apply_excel_formatting(writer, df_repetidos, 'Repetidos')
             else:
                 pd.DataFrame({'Mensagem': ['Nenhum contrato repetido encontrado']}).to_excel(
-                    writer, sheet_name='Contratos Repetidos', index=False
-                )
-            
-            # Aba 4: Contratos por Banco
-            if not df_por_banco.empty:
-                df_por_banco.to_excel(writer, sheet_name='Contratos por Banco', index=False)
-            else:
-                pd.DataFrame({'Mensagem': ['Nenhum dado disponível']}).to_excel(
-                    writer, sheet_name='Contratos por Banco', index=False
+                    writer, sheet_name='Repetidos', index=False
                 )
         
         # Resetar ponteiro e ler dados
