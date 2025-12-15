@@ -58,12 +58,15 @@ async def processar_contratos_endpoint(
     Retorna:
     - Arquivo Excel consolidado (.xlsx) como StreamingResponse
     """
-    # Validar file_type
-    if file_type not in ["3026-11", "3026-12", "3026-15", "todos"]:
+    # Validar file_type no servidor
+    valid_file_types = ["3026-11", "3026-12", "3026-15", "todos"]
+    file_type_normalized = file_type.strip() if file_type else ""
+    if file_type_normalized not in valid_file_types:
         raise HTTPException(
             status_code=400,
-            detail="file_type deve ser '3026-11', '3026-12', '3026-15' ou 'todos'"
+            detail=f"file_type inválido: '{file_type}'. Valores aceitos: {', '.join(valid_file_types)}"
         )
+    file_type = file_type_normalized
     
     # Validar period_filter_enabled
     if period_filter_enabled not in ["true", "false"]:

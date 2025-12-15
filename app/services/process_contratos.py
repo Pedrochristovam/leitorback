@@ -1098,13 +1098,25 @@ async def process_contratos(
         excel_data = output.read()
         output.close()
         
-        # Nome do arquivo de saída
+        # Nome do arquivo de saída - varia com base no file_type
         filtro_nome = filter_type.upper()
         banco_nome = "BEMGE" if bank_type_normalized == "bemge" else "MINAS_CAIXA"
-        tipo_nome = f"_{file_type}" if file_type != "todos" else ""
+        
+        # Variar nome do arquivo baseado no file_type
+        if file_type == "todos":
+            tipo_nome = "TODOS_TIPOS"
+        elif file_type == "3026-11":
+            tipo_nome = "3026-11"
+        elif file_type == "3026-12":
+            tipo_nome = "3026-12"
+        elif file_type == "3026-15":
+            tipo_nome = "3026-15"
+        else:
+            tipo_nome = file_type.upper().replace("-", "_")
+        
         periodo_nome = f"_{months_back}MESES" if period_filter_active else ""
         
-        filename_output = f"contratos{tipo_nome}_{banco_nome}_{filtro_nome}{periodo_nome}_consolidado.xlsx"
+        filename_output = f"contratos_{tipo_nome}_{banco_nome}_{filtro_nome}{periodo_nome}_consolidado.xlsx"
         
         logger.info(f"Processamento concluído. Arquivo: {filename_output}")
         
