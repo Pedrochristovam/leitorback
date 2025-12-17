@@ -1,22 +1,56 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from typing import List, Optional
 import pandas as pd
 import io
 from app.services.process_contratos import process_contratos
+from app.routes import files
 
 app = FastAPI()
 
+# CONFIGURAÇÃO CORS - Melhorada com origens específicas
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://leitorarquivos.onrender.com",
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Incluir rotas de arquivos
+app.include_router(files.router)
+
+# Tratamento de erros global
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"erro": exc.detail}
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=422,
+        content={"erro": "Dados inválidos", "detalhes": str(exc)}
+    )
+
 @app.get("/")
 def home():
     return {"message": "API do Leitor de Arquivos rodando!"}
+
+@app.get("/health")
+async def health_check():
+    """Endpoint de health check para verificar se o servidor está funcionando"""
+    return {"status": "ok", "message": "Servidor funcionando"}
 
 @app.post("/processar/")
 async def processar_excel(file: UploadFile = File(...)):
