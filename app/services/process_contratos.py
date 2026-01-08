@@ -3,7 +3,7 @@ import io
 import os
 import re
 import logging
-from typing import List
+from typing import List, Optional
 from pathlib import Path
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
@@ -28,6 +28,10 @@ def get_sheet_names(bank_type: str) -> dict:
             '3026-11': 'Bemge 3026-11-Habil.Não Homol.',
             '3026-12-AUD': 'Bemge 3026-12-Homol.Auditados',
             '3026-12-NAUD': 'Bemge 3026-12-Homol.Não Auditados',
+            '3026-12-TODOS': 'Bemge 3026-12-Homol.Todos',
+            '3026-12-ULTIMOS_TODOS': 'Bemge 3026-12-Últ2M.Todos',
+            '3026-12-ULTIMOS_AUD': 'Bemge 3026-12-Últ2M.Auditados',
+            '3026-12-ULTIMOS_NAUD': 'Bemge 3026-12-Últ2M.Não Auditados',
             '3026-15': 'Bemge 3026-15-Homol.Neg.Cob'
         }
     else:  # minas_caixa
@@ -35,6 +39,10 @@ def get_sheet_names(bank_type: str) -> dict:
             '3026-11': 'Minas Caixa 3026-11-Habil.Não Homol',
             '3026-12-AUD': 'Minas Caixa 3026-12-Homol. Auditado',
             '3026-12-NAUD': 'Minas Caixa 3026-12-Homol.Não Auditado',
+            '3026-12-TODOS': 'Minas Caixa 3026-12-Homol.Todos',
+            '3026-12-ULTIMOS_TODOS': 'Minas Caixa 3026-12-Últ2M.Todos',
+            '3026-12-ULTIMOS_AUD': 'Minas Caixa 3026-12-Últ2M.Auditado',
+            '3026-12-ULTIMOS_NAUD': 'Minas Caixa 3026-12-Últ2M.Não Audit.',
             '3026-15': 'Minas Caixa 3026-15-Homol.Neg.Cob'
         }
 
@@ -518,6 +526,188 @@ def process_3026_12(df: pd.DataFrame, bank_name: str) -> dict:
     }
 
 
+def filtrar_planilha_contratos(
+    df: pd.DataFrame,
+    aplicar_periodo: bool = False,
+    reference_date: Optional[str] = None,
+    months_back: int = 2,
+    aplicar_habitacional: bool = False,
+    aplicar_3026_15: bool = False,
+    date_column: str = None
+) -> pd.DataFrame:
+    """
+    Aplica filtros condicionais em um DataFrame de contratos.
+    """
+    if df.empty:
+        return df
+
+    df_filtrado = df.copy()
+
+    if aplicar_periodo:
+        df_filtrado = filter_by_period(df_filtrado, reference_date, months_back, date_column)
+
+    if aplicar_habitacional:
+        valores_filtro = {'0X0', '1X4', '6X4', '8X4'}
+        filter_cols = ['DEST.PAGAM', 'DEST.COMPLEM']
+        for col in filter_cols:
+            if col in df_filtrado.columns and len(df_filtrado) > 0:
+                df_filtrado[col] = df_filtrado[col].astype(str).str.upper().str.strip()
+                mask = ~df_filtrado[col].isin(valores_filtro)
+                df_filtrado = df_filtrado[mask].copy()
+
+    if aplicar_3026_15 and 'TIPO_ARQUIVO' in df_filtrado.columns:
+        df_filtrado = df_filtrado[df_filtrado['TIPO_ARQUIVO'] == '3026-15'].copy()
+
+    return df_filtrado
+
+
+def processar_3026_12_com_abas(
+    df: pd.DataFrame,
+    bank_name: str,
+    period_filter_active: bool,
+    reference_date: Optional[str],
+    months_back: int
+) -> dict:
+    resumo = process_3026_12(df, bank_name)
+
+    df_aud, total_aud, unicos_aud, duplicados_aud = resumo['aud']
+    df_naud, total_naud, unicos_naud, duplicados_naud = resumo['naud']
+
+    def preparar_sub_df(sub_df: pd.DataFrame, tipo: str) -> pd.DataFrame:
+        if sub_df.empty:
+            return pd.DataFrame()
+
+        df_copy = sub_df.copy()
+        df_copy['BANCO'] = bank_name
+        df_copy['TIPO_ARQUIVO'] = '3026-12'
+        df_copy['AUDITADO_TIPO'] = 'AUD' if tipo == 'aud' else 'NAUD'
+        df_copy['DUPLICADO'] = df_copy['CONTRATO'].duplicated(keep=False)
+        return df_copy
+
+    df_aud_processado = preparar_sub_df(df_aud, 'aud')
+    df_naud_processado = preparar_sub_df(df_naud, 'naud')
+
+    dfs_para_todos = [df for df in [df_aud_processado, df_naud_processado] if not df.empty]
+    df_todos = pd.concat(dfs_para_todos, ignore_index=True) if dfs_para_todos else pd.DataFrame()
+
+    period_keys = {
+        'auditados_ultimos_2_meses': df_aud_processado,
+        'naud_ultimos_2_meses': df_naud_processado,
+        'todos_ultimos_2_meses': df_todos
+    }
+
+    periodos = {}
+    if period_filter_active:
+        for key, subset in period_keys.items():
+            periodos[key] = (
+                filtrar_planilha_contratos(
+                    subset,
+                    aplicar_periodo=True,
+                    reference_date=reference_date,
+                    months_back=months_back
+                ) if not subset.empty else pd.DataFrame()
+            )
+    else:
+        for key in period_keys:
+            periodos[key] = pd.DataFrame()
+
+    logger.debug("Abas 3026-12 construídas para todos/auditados/nauditados")
+
+    return {
+        'abas': {
+            'todos': df_todos,
+            'auditados': df_aud_processado,
+            'naud': df_naud_processado,
+            **periodos
+        },
+        'stats': {
+            'aud': {
+                'total_linhas': total_aud,
+                'total_unicos': unicos_aud,
+                'total_duplicados': duplicados_aud
+            },
+            'naud': {
+                'total_linhas': total_naud,
+                'total_unicos': unicos_naud,
+                'total_duplicados': duplicados_naud
+            }
+        }
+    }
+
+
+def gerar_resumo_geral(df_full: pd.DataFrame) -> pd.DataFrame:
+    if df_full.empty:
+        return pd.DataFrame()
+
+    df = df_full.copy()
+    df['BANCO'] = df.get('BANCO', 'NÃO INFORMADO').fillna('NÃO INFORMADO')
+    df['DUPLICADO'] = df.get('DUPLICADO', False)
+
+    group_cols = ['BANCO', 'TIPO_ARQUIVO']
+    if 'AUDITADO_TIPO' in df.columns:
+        group_cols.append('AUDITADO_TIPO')
+
+    summary = (
+        df.groupby(group_cols, dropna=False)
+        .agg(
+            TOTAL_LINHAS=('CONTRATO', 'size'),
+            CONTRATOS_UNICOS=('CONTRATO', lambda s: s.nunique()),
+            CONTRATOS_DUPLICADOS=('DUPLICADO', lambda s: int(s.sum()) if not s.empty else 0)
+        )
+        .reset_index()
+    )
+
+    total_row = {
+        'BANCO': 'TOTAL GERAL',
+        'TIPO_ARQUIVO': '-',
+        'TOTAL_LINHAS': summary['TOTAL_LINHAS'].sum(),
+        'CONTRATOS_UNICOS': summary['CONTRATOS_UNICOS'].sum(),
+        'CONTRATOS_DUPLICADOS': summary['CONTRATOS_DUPLICADOS'].sum()
+    }
+    if 'AUDITADO_TIPO' in summary.columns:
+        total_row['AUDITADO_TIPO'] = '-'
+
+    summary = pd.concat([summary, pd.DataFrame([total_row])], ignore_index=True)
+    return summary
+
+
+def gerar_contratos_repetidos(df_full: pd.DataFrame) -> pd.DataFrame:
+    if df_full.empty:
+        return pd.DataFrame()
+
+    if 'DUPLICADO' in df_full.columns:
+        df_repetidos = df_full[df_full['DUPLICADO'] == True].copy()
+    else:
+        df_repetidos = df_full[df_full.duplicated(subset=['CONTRATO'], keep=False)].copy()
+
+    if df_repetidos.empty and 'CONTRATO' in df_full.columns:
+        df_repetidos = df_full[df_full.duplicated(subset=['CONTRATO'], keep=False)].copy()
+
+    return df_repetidos.drop_duplicates()
+
+
+def gerar_contratos_por_banco(df_full: pd.DataFrame) -> pd.DataFrame:
+    if df_full.empty:
+        return pd.DataFrame()
+
+    df = df_full.copy()
+    if 'BANCO' not in df.columns:
+        df['BANCO'] = 'NÃO INFORMADO'
+    else:
+        df['BANCO'] = df['BANCO'].fillna('NÃO INFORMADO')
+
+    summary = (
+        df.groupby('BANCO', dropna=False)
+        .agg(
+            TOTAL_CONTRATOS=('CONTRATO', 'size'),
+            CONTRATOS_UNICOS=('CONTRATO', lambda s: s.nunique()),
+            CONTRATOS_DUPLICADOS=('CONTRATO', lambda s: s.duplicated(keep=False).sum())
+        )
+        .reset_index()
+    )
+    return summary
+
+
 def apply_excel_formatting(writer, df: pd.DataFrame, sheet_name: str):
     """
     Aplica formatação no Excel:
@@ -721,20 +911,19 @@ async def process_contratos(
         
         # Estruturas para consolidar dados
         all_contratos = []
-        contratos_repetidos = []
-        resumo_geral = []
-        contratos_por_banco = []
-        
-        # Estruturas para separar por abas
         dados_por_aba = {
             '3026-11': [],
-            '3026-12 AUD': [],
-            '3026-12 NAUD': [],
             '3026-15': []
         }
-        
-        # Estrutura para contratos dos últimos 2 meses
-        dados_ultimos_2_meses = []
+        dados_3026_12 = {
+            'todos': [],
+            'auditados': [],
+            'naud': [],
+            'todos_ultimos_2_meses': [],
+            'auditados_ultimos_2_meses': [],
+            'naud_ultimos_2_meses': []
+        }
+        tem_3026_12 = False
         
         # Processar cada arquivo
         for file in files:
@@ -776,181 +965,127 @@ async def process_contratos(
             
             if detected_file_type == '3026-11':
                 df_processado, total_linhas, total_unicos, total_duplicados = process_3026_11(df, bank_name)
-                
+
                 if df_processado.empty:
                     continue
-                
+
                 df_processado['TIPO_ARQUIVO'] = '3026-11'
                 df_processado['BANCO'] = bank_name
                 df_processado['DUPLICADO'] = df_processado['CONTRATO'].duplicated(keep=False)
-                
-                # Aplicar filtro de auditado se necessário
+
                 if filter_type != 'todos' and 'AUDITADO' in df_processado.columns:
                     df_processado['AUDITADO'] = df_processado['AUDITADO'].astype(str).str.upper().str.strip()
                     if filter_type == 'auditado':
-                        df_processado = df_processado[df_processado['AUDITADO'].isin(['AUDI', 'AUD', 'AUDITADO'])].copy()
+                        df_processado = df_processado[
+                            df_processado['AUDITADO'].isin(['AUDI', 'AUD', 'AUDITADO'])
+                        ].copy()
                     elif filter_type == 'nauditado':
-                        df_processado = df_processado[df_processado['AUDITADO'].isin(['NAUD', 'NAO AUDITADO', 'NAUDITADO'])].copy()
-                
-                # Aplicar filtro de período se necessário
+                        df_processado = df_processado[
+                            df_processado['AUDITADO'].isin(['NAUD', 'NAO AUDITADO', 'NAUDITADO'])
+                        ].copy()
+
                 if period_filter_active:
-                    df_processado = filter_by_period(df_processado, reference_date, months_back)
-                
+                    df_processado = filtrar_planilha_contratos(
+                        df_processado,
+                        aplicar_periodo=True,
+                        reference_date=reference_date,
+                        months_back=months_back
+                    )
+
                 all_contratos.append(df_processado)
                 dados_por_aba['3026-11'].append(df_processado.copy())
-                
-                # Adicionar aos últimos N meses (para aba separada)
-                df_filtrado_periodo = filter_by_period(df_processado, reference_date, months_back)
-                if not df_filtrado_periodo.empty:
-                    dados_ultimos_2_meses.append(df_filtrado_periodo.copy())
-                
-                # Contratos repetidos
-                df_repetidos = df_processado[df_processado['DUPLICADO'] == True].copy()
-                if len(df_repetidos) > 0:
-                    contratos_repetidos.append(df_repetidos)
-                
-                # Salvar arquivo
+
                 save_filename = f"3026-11 - {bank_name} - {total_unicos} (CONTRATOS).xlsx"
                 save_filepath = base_dir / save_filename
                 save_processed_file(df_processado, str(save_filepath))
-                
+
                 if 'AUDITADO' in df_processado.columns:
                     filepath_filtragem = filtragem_dir / save_filename
                     save_processed_file(df_processado, str(filepath_filtragem))
-                
-                resumo_geral.append({
-                    'ARQUIVO': filename,
-                    'TIPO': '3026-11',
-                    'TOTAL_LINHAS': total_linhas,
-                    'CONTRATOS_UNICOS': total_unicos,
-                    'CONTRATOS_DUPLICADOS': total_duplicados,
-                    'BANCO': bank_name
-                })
-                
-                df_banco = df_processado[['CONTRATO', 'TIPO_ARQUIVO', 'BANCO']].copy()
-                contratos_por_banco.append(df_banco)
-            
+
             elif detected_file_type == '3026-15':
                 df_processado, total_linhas, total_unicos, total_duplicados = process_3026_15(df, bank_name)
-                
+
                 if df_processado.empty:
                     continue
-                
+
                 df_processado['TIPO_ARQUIVO'] = '3026-15'
                 df_processado['BANCO'] = bank_name
                 df_processado['DUPLICADO'] = df_processado['CONTRATO'].duplicated(keep=False)
-                
-                # Aplicar filtro de auditado se necessário
+
                 if filter_type != 'todos' and 'AUDITADO' in df_processado.columns:
                     df_processado['AUDITADO'] = df_processado['AUDITADO'].astype(str).str.upper().str.strip()
                     if filter_type == 'auditado':
-                        df_processado = df_processado[df_processado['AUDITADO'].isin(['AUDI', 'AUD', 'AUDITADO'])].copy()
+                        df_processado = df_processado[
+                            df_processado['AUDITADO'].isin(['AUDI', 'AUD', 'AUDITADO'])
+                        ].copy()
                     elif filter_type == 'nauditado':
-                        df_processado = df_processado[df_processado['AUDITADO'].isin(['NAUD', 'NAO AUDITADO', 'NAUDITADO'])].copy()
-                
-                # Aplicar filtro de período se necessário
+                        df_processado = df_processado[
+                            df_processado['AUDITADO'].isin(['NAUD', 'NAO AUDITADO', 'NAUDITADO'])
+                        ].copy()
+
                 if period_filter_active:
-                    df_processado = filter_by_period(df_processado, reference_date, months_back)
-                
+                    df_processado = filtrar_planilha_contratos(
+                        df_processado,
+                        aplicar_periodo=True,
+                        reference_date=reference_date,
+                        months_back=months_back
+                    )
+
                 all_contratos.append(df_processado)
                 dados_por_aba['3026-15'].append(df_processado.copy())
-                
-                # Adicionar aos últimos N meses (para aba separada)
-                df_filtrado_periodo = filter_by_period(df_processado, reference_date, months_back)
-                if not df_filtrado_periodo.empty:
-                    dados_ultimos_2_meses.append(df_filtrado_periodo.copy())
-                
-                # Contratos repetidos
-                df_repetidos = df_processado[df_processado['DUPLICADO'] == True].copy()
-                if len(df_repetidos) > 0:
-                    contratos_repetidos.append(df_repetidos)
-                
-                # Salvar arquivo
+
                 save_filename = f"3026-15 - {bank_name} - {total_unicos} (CONTRATOS).xlsx"
                 save_filepath = base_dir / save_filename
                 save_processed_file(df_processado, str(save_filepath))
-                
+
                 if 'AUDITADO' in df_processado.columns:
                     filepath_filtragem = filtragem_dir / save_filename
                     save_processed_file(df_processado, str(filepath_filtragem))
-                
-                resumo_geral.append({
-                    'ARQUIVO': filename,
-                    'TIPO': '3026-15',
-                    'TOTAL_LINHAS': total_linhas,
-                    'CONTRATOS_UNICOS': total_unicos,
-                    'CONTRATOS_DUPLICADOS': total_duplicados,
-                    'BANCO': bank_name
-                })
-                
-                df_banco = df_processado[['CONTRATO', 'TIPO_ARQUIVO', 'BANCO']].copy()
-                contratos_por_banco.append(df_banco)
-            
+
             elif detected_file_type == '3026-12':
-                resultados = process_3026_12(df, bank_name)
-                
-                # Determinar quais tipos processar baseado no filter_type
-                tipos_processar = []
-                if filter_type == 'auditado':
-                    tipos_processar = ['aud']
-                elif filter_type == 'nauditado':
-                    tipos_processar = ['naud']
-                else:
-                    tipos_processar = ['aud', 'naud']
-                
-                for tipo_aud in tipos_processar:
-                    df_processado, total_linhas, total_unicos, total_duplicados = resultados[tipo_aud]
-                    
-                    if len(df_processado) == 0:
-                        logger.warning(f"Nenhum dado para 3026-12 {tipo_aud.upper()}")
+                resultados = processar_3026_12_com_abas(
+                    df,
+                    bank_name,
+                    period_filter_active,
+                    reference_date,
+                    months_back
+                )
+                abas = resultados['abas']
+                stats = resultados['stats']
+                tem_3026_12 = True
+
+                for chave, subset in abas.items():
+                    if subset.empty:
                         continue
-                    
-                    df_processado = df_processado.copy()
-                    df_processado['TIPO_ARQUIVO'] = '3026-12'
-                    df_processado['AUDITADO_TIPO'] = tipo_aud.upper()
-                    df_processado['BANCO'] = bank_name
-                    df_processado['DUPLICADO'] = df_processado['CONTRATO'].duplicated(keep=False)
-                    
-                    # Aplicar filtro de período se necessário
-                    if period_filter_active:
-                        df_processado = filter_by_period(df_processado, reference_date, months_back)
-                    
-                    all_contratos.append(df_processado)
-                    
-                    aba_nome = f"3026-12 {tipo_aud.upper()}"
-                    if aba_nome in dados_por_aba:
-                        dados_por_aba[aba_nome].append(df_processado.copy())
-                    
-                    # Adicionar aos últimos N meses (para aba separada)
-                    df_filtrado_periodo = filter_by_period(df_processado, reference_date, months_back)
-                    if not df_filtrado_periodo.empty:
-                        dados_ultimos_2_meses.append(df_filtrado_periodo.copy())
-                    
-                    # Contratos repetidos
-                    df_repetidos = df_processado[df_processado['DUPLICADO'] == True].copy()
-                    if len(df_repetidos) > 0:
-                        contratos_repetidos.append(df_repetidos)
-                    
-                    # Salvar arquivo
-                    tipo_nome = 'AUD' if tipo_aud == 'aud' else 'NAUD'
-                    save_filename = f"3026-12 - {bank_name} - {tipo_nome} - {total_unicos} (CONTRATOS).xlsx"
+                    dados_3026_12[chave].append(subset.copy())
+
+                for tipo_label, subset_key in [('AUD', 'auditados'), ('NAUD', 'naud')]:
+                    df_subset = abas.get(subset_key)
+                    if df_subset is None or df_subset.empty:
+                        continue
+
+                    df_para_salvar = (
+                        filtrar_planilha_contratos(
+                            df_subset,
+                            aplicar_periodo=period_filter_active,
+                            reference_date=reference_date,
+                            months_back=months_back
+                        ) if period_filter_active else df_subset.copy()
+                    )
+
+                    all_contratos.append(df_subset)
+
+                    total_unicos = stats[subset_key]['total_unicos']
+                    save_filename = f"3026-12 - {bank_name} - {tipo_label} - {total_unicos} (CONTRATOS).xlsx"
                     save_filepath = base_dir / save_filename
-                    save_processed_file(df_processado, str(save_filepath))
-                    
-                    filepath_filtragem = filtragem_dir / save_filename
-                    save_processed_file(df_processado, str(filepath_filtragem))
-                    
-                    resumo_geral.append({
-                        'ARQUIVO': filename,
-                        'TIPO': f'3026-12-{tipo_nome}',
-                        'TOTAL_LINHAS': total_linhas,
-                        'CONTRATOS_UNICOS': total_unicos,
-                        'CONTRATOS_DUPLICADOS': total_duplicados,
-                        'BANCO': bank_name
-                    })
-                    
-                    df_banco = df_processado[['CONTRATO', 'TIPO_ARQUIVO', 'BANCO', 'AUDITADO_TIPO']].copy()
-                    contratos_por_banco.append(df_banco)
+
+                    if not df_para_salvar.empty:
+                        save_processed_file(df_para_salvar, str(save_filepath))
+                        filepath_filtragem = filtragem_dir / save_filename
+                        save_processed_file(df_para_salvar, str(filepath_filtragem))
+                    else:
+                        logger.debug(f"Filtragem removeu todos os contratos para {tipo_label}, não salvando arquivo filtrado.")
         
         # Consolidar todos os dados
         if not all_contratos:
@@ -958,139 +1093,141 @@ async def process_contratos(
                 status_code=400,
                 detail="Nenhum arquivo válido foi processado"
             )
-        
-        df_all_contratos = pd.concat(all_contratos, ignore_index=True)
-        
-        logger.info(f"Total de contratos consolidados: {len(df_all_contratos)}")
-        
-        # Aplicar filtro final baseado em filter_type
+
+        df_full = pd.concat(all_contratos, ignore_index=True)
+
+        logger.info(f"Total de contratos consolidados: {len(df_full)}")
+
+        df_filtrado = df_full.copy()
         if filter_type != 'todos':
-            if 'AUDITADO_TIPO' in df_all_contratos.columns:
+            if 'AUDITADO_TIPO' in df_filtrado.columns:
                 if filter_type == 'auditado':
-                    df_all_contratos = df_all_contratos[df_all_contratos['AUDITADO_TIPO'] == 'AUD'].copy()
+                    df_filtrado = df_filtrado[df_filtrado['AUDITADO_TIPO'] == 'AUD'].copy()
                 elif filter_type == 'nauditado':
-                    df_all_contratos = df_all_contratos[df_all_contratos['AUDITADO_TIPO'] == 'NAUD'].copy()
-            elif 'AUDITADO' in df_all_contratos.columns:
-                df_all_contratos['AUDITADO'] = df_all_contratos['AUDITADO'].astype(str).str.upper().str.strip()
+                    df_filtrado = df_filtrado[df_filtrado['AUDITADO_TIPO'] == 'NAUD'].copy()
+            elif 'AUDITADO' in df_filtrado.columns:
+                df_filtrado['AUDITADO'] = df_filtrado['AUDITADO'].astype(str).str.upper().str.strip()
                 if filter_type == 'auditado':
-                    df_all_contratos = df_all_contratos[df_all_contratos['AUDITADO'].isin(['AUDI', 'AUD', 'AUDITADO'])].copy()
+                    df_filtrado = df_filtrado[df_filtrado['AUDITADO'].isin(['AUDI', 'AUD', 'AUDITADO'])].copy()
                 elif filter_type == 'nauditado':
-                    df_all_contratos = df_all_contratos[df_all_contratos['AUDITADO'].isin(['NAUD', 'NAO AUDITADO', 'NAUDITADO'])].copy()
+                    df_filtrado = df_filtrado[df_filtrado['AUDITADO'].isin(['NAUD', 'NAO AUDITADO', 'NAUDITADO'])].copy()
+
+        df_filtrado = filtrar_planilha_contratos(
+            df_filtrado,
+            aplicar_periodo=period_filter_active,
+            reference_date=reference_date,
+            months_back=months_back
+        )
+
+        df_ultimos_2_meses = (
+            filtrar_planilha_contratos(
+                df_full,
+                aplicar_periodo=period_filter_active,
+                reference_date=reference_date,
+                months_back=months_back
+            ) if period_filter_active else pd.DataFrame()
+        )
+
+        df_resumo = gerar_resumo_geral(df_full)
+        df_repetidos = gerar_contratos_repetidos(df_full)
+        df_contratos_por_banco = gerar_contratos_por_banco(df_full)
         
-        # Criar DataFrame de contratos repetidos
-        if contratos_repetidos:
-            df_repetidos = pd.concat(contratos_repetidos, ignore_index=True)
-            if filter_type != 'todos':
-                if 'AUDITADO_TIPO' in df_repetidos.columns:
-                    if filter_type == 'auditado':
-                        df_repetidos = df_repetidos[df_repetidos['AUDITADO_TIPO'] == 'AUD'].copy()
-                    elif filter_type == 'nauditado':
-                        df_repetidos = df_repetidos[df_repetidos['AUDITADO_TIPO'] == 'NAUD'].copy()
-                elif 'AUDITADO' in df_repetidos.columns:
-                    df_repetidos['AUDITADO'] = df_repetidos['AUDITADO'].astype(str).str.upper().str.strip()
-                    if filter_type == 'auditado':
-                        df_repetidos = df_repetidos[df_repetidos['AUDITADO'].isin(['AUDI', 'AUD', 'AUDITADO'])].copy()
-                    elif filter_type == 'nauditado':
-                        df_repetidos = df_repetidos[df_repetidos['AUDITADO'].isin(['NAUD', 'NAO AUDITADO', 'NAUDITADO'])].copy()
-        else:
-            df_repetidos = pd.DataFrame()
-        
-        # Criar DataFrame de últimos 2 meses
-        if dados_ultimos_2_meses:
-            df_ultimos_2_meses = pd.concat(dados_ultimos_2_meses, ignore_index=True)
-        else:
-            df_ultimos_2_meses = pd.DataFrame()
-        
-        # Criar DataFrame de resumo geral
-        df_resumo = pd.DataFrame(resumo_geral)
-        
-        # Calcular totais
-        total_geral = len(df_all_contratos)
-        
-        if 'AUDITADO_TIPO' in df_all_contratos.columns:
-            total_auditados = len(df_all_contratos[df_all_contratos['AUDITADO_TIPO'] == 'AUD'])
-            total_nauditados = len(df_all_contratos[df_all_contratos['AUDITADO_TIPO'] == 'NAUD'])
-        elif 'AUDITADO' in df_all_contratos.columns:
-            df_all_contratos['AUDITADO'] = df_all_contratos['AUDITADO'].astype(str).str.upper().str.strip()
-            total_auditados = len(df_all_contratos[df_all_contratos['AUDITADO'].isin(['AUDI', 'AUD', 'AUDITADO'])])
-            total_nauditados = len(df_all_contratos[df_all_contratos['AUDITADO'].isin(['NAUD', 'NAO AUDITADO', 'NAUDITADO'])])
-        else:
-            total_auditados = 0
-            total_nauditados = 0
-        
-        total_repetidos = len(df_repetidos) if not df_repetidos.empty else 0
-        
-        linha_totais = pd.DataFrame([{
-            'ARQUIVO': 'TOTAL GERAL',
-            'TIPO': '-',
-            'TOTAL_LINHAS': total_geral,
-            'CONTRATOS_UNICOS': total_geral - total_repetidos,
-            'CONTRATOS_DUPLICADOS': total_repetidos,
-            'BANCO': bank_name
-        }])
-        df_resumo = pd.concat([df_resumo, linha_totais], ignore_index=True)
         
         # Criar arquivo Excel consolidado
         output = io.BytesIO()
-        
+
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            # Aba: Resumo Geral
-            df_resumo.to_excel(writer, sheet_name='Resumo Geral', index=False)
-            
-            # Aba: 3026-11 com nome padronizado
+            if not df_resumo.empty:
+                df_resumo.to_excel(writer, sheet_name='Resumo Geral', index=False)
+                apply_excel_formatting(writer, df_resumo, 'Resumo Geral')
+            else:
+                pd.DataFrame({'Mensagem': ['Resumo geral não disponível']}).to_excel(
+                    writer, sheet_name='Resumo Geral', index=False
+                )
+
+            nome_repetidos = 'Contratos Repetidos'
+            if not df_repetidos.empty:
+                df_repetidos.to_excel(writer, sheet_name=nome_repetidos, index=False)
+                apply_excel_formatting(writer, df_repetidos, nome_repetidos)
+            else:
+                pd.DataFrame({'Mensagem': ['Nenhum contrato repetido encontrado']}).to_excel(
+                    writer, sheet_name=nome_repetidos, index=False
+                )
+
+            nome_por_banco = 'Contratos por Banco'
+            if not df_contratos_por_banco.empty:
+                df_contratos_por_banco.to_excel(writer, sheet_name=nome_por_banco, index=False)
+                apply_excel_formatting(writer, df_contratos_por_banco, nome_por_banco)
+            else:
+                pd.DataFrame({'Mensagem': ['Nenhum contrato por banco encontrado']}).to_excel(
+                    writer, sheet_name=nome_por_banco, index=False
+                )
+
             if dados_por_aba['3026-11']:
                 df_3026_11 = pd.concat(dados_por_aba['3026-11'], ignore_index=True)
-                nome_aba_11 = sheet_names['3026-11'][:31]  # Limitar a 31 caracteres
+                nome_aba_11 = sheet_names['3026-11'][:31]
                 df_3026_11.to_excel(writer, sheet_name=nome_aba_11, index=False)
                 apply_excel_formatting(writer, df_3026_11, nome_aba_11)
-            
-            # Aba: 3026-12 AUD com nome padronizado
-            if dados_por_aba['3026-12 AUD']:
-                df_3026_12_aud = pd.concat(dados_por_aba['3026-12 AUD'], ignore_index=True)
-                nome_aba_12_aud = sheet_names['3026-12-AUD'][:31]
-                df_3026_12_aud.to_excel(writer, sheet_name=nome_aba_12_aud, index=False)
-                apply_excel_formatting(writer, df_3026_12_aud, nome_aba_12_aud)
-                # Adicionar soma da coluna AE
-                add_column_ae_sum(writer, df_3026_12_aud, nome_aba_12_aud)
-            
-            # Aba: 3026-12 NAUD com nome padronizado
-            if dados_por_aba['3026-12 NAUD']:
-                df_3026_12_naud = pd.concat(dados_por_aba['3026-12 NAUD'], ignore_index=True)
-                nome_aba_12_naud = sheet_names['3026-12-NAUD'][:31]
-                df_3026_12_naud.to_excel(writer, sheet_name=nome_aba_12_naud, index=False)
-                apply_excel_formatting(writer, df_3026_12_naud, nome_aba_12_naud)
-                # Adicionar soma da coluna AE
-                add_column_ae_sum(writer, df_3026_12_naud, nome_aba_12_naud)
-            
-            # Aba: 3026-15 com nome padronizado
+
+            if tem_3026_12:
+                nome_12_todos = sheet_names['3026-12-TODOS'][:31]
+                if dados_3026_12['todos']:
+                    df_3026_12_todos = pd.concat(dados_3026_12['todos'], ignore_index=True)
+                    df_3026_12_todos.to_excel(writer, sheet_name=nome_12_todos, index=False)
+                    apply_excel_formatting(writer, df_3026_12_todos, nome_12_todos)
+
+                if dados_3026_12['auditados']:
+                    df_3026_12_aud = pd.concat(dados_3026_12['auditados'], ignore_index=True)
+                    nome_aba_12_aud = sheet_names['3026-12-AUD'][:31]
+                    df_3026_12_aud.to_excel(writer, sheet_name=nome_aba_12_aud, index=False)
+                    apply_excel_formatting(writer, df_3026_12_aud, nome_aba_12_aud)
+                    add_column_ae_sum(writer, df_3026_12_aud, nome_aba_12_aud)
+
+                if dados_3026_12['naud']:
+                    df_3026_12_naud = pd.concat(dados_3026_12['naud'], ignore_index=True)
+                    nome_aba_12_naud = sheet_names['3026-12-NAUD'][:31]
+                    df_3026_12_naud.to_excel(writer, sheet_name=nome_aba_12_naud, index=False)
+                    apply_excel_formatting(writer, df_3026_12_naud, nome_aba_12_naud)
+                    add_column_ae_sum(writer, df_3026_12_naud, nome_aba_12_naud)
+
+                if period_filter_active:
+                    for chave, nome_chave in [
+                        ('auditados_ultimos_2_meses', sheet_names['3026-12-ULTIMOS_AUD']),
+                        ('naud_ultimos_2_meses', sheet_names['3026-12-ULTIMOS_NAUD']),
+                        ('todos_ultimos_2_meses', sheet_names['3026-12-ULTIMOS_TODOS'])
+                    ]:
+                        if dados_3026_12[chave]:
+                            df_periodo = pd.concat(dados_3026_12[chave], ignore_index=True)
+                            nome_periodo = nome_chave[:31]
+                            df_periodo.to_excel(writer, sheet_name=nome_periodo, index=False)
+                            apply_excel_formatting(writer, df_periodo, nome_periodo)
+
+            if not df_filtrado.empty:
+                df_filtrado.to_excel(writer, sheet_name='Dados Filtrados', index=False)
+                apply_excel_formatting(writer, df_filtrado, 'Dados Filtrados')
+            else:
+                pd.DataFrame({'Mensagem': ['Filtros removeram todos os contratos']}).to_excel(
+                    writer, sheet_name='Dados Filtrados', index=False
+                )
+
             if dados_por_aba['3026-15']:
                 df_3026_15 = pd.concat(dados_por_aba['3026-15'], ignore_index=True)
                 nome_aba_15 = sheet_names['3026-15'][:31]
                 df_3026_15.to_excel(writer, sheet_name=nome_aba_15, index=False)
                 apply_excel_formatting(writer, df_3026_15, nome_aba_15)
-            
-            # Aba: Últimos N Meses (baseado no período selecionado)
-            nome_aba_periodo = f'Últimos {months_back} Meses'[:31]  # Limitar a 31 caracteres
-            if not df_ultimos_2_meses.empty:
-                df_ultimos_2_meses.to_excel(writer, sheet_name=nome_aba_periodo, index=False)
-                apply_excel_formatting(writer, df_ultimos_2_meses, nome_aba_periodo)
+
+            nome_aba_periodo = f'Últimos {months_back} Meses'[:31]
+            if period_filter_active:
+                if not df_ultimos_2_meses.empty:
+                    df_ultimos_2_meses.to_excel(writer, sheet_name=nome_aba_periodo, index=False)
+                    apply_excel_formatting(writer, df_ultimos_2_meses, nome_aba_periodo)
+                else:
+                    pd.DataFrame({'Mensagem': [f'Nenhum contrato encontrado nos últimos {months_back} meses']}).to_excel(
+                        writer, sheet_name=nome_aba_periodo, index=False
+                    )
             else:
-                pd.DataFrame({'Mensagem': [f'Nenhum contrato encontrado nos últimos {months_back} meses']}).to_excel(
+                pd.DataFrame({'Mensagem': ['Filtro de período desativado']}).to_excel(
                     writer, sheet_name=nome_aba_periodo, index=False
-                )
-            
-            # Aba: Todos os Contratos
-            if not df_all_contratos.empty:
-                df_all_contratos.to_excel(writer, sheet_name='Todos Contratos', index=False)
-                apply_excel_formatting(writer, df_all_contratos, 'Todos Contratos')
-            
-            # Aba: Contratos Repetidos
-            if not df_repetidos.empty:
-                df_repetidos.to_excel(writer, sheet_name='Repetidos', index=False)
-                apply_excel_formatting(writer, df_repetidos, 'Repetidos')
-            else:
-                pd.DataFrame({'Mensagem': ['Nenhum contrato repetido encontrado']}).to_excel(
-                    writer, sheet_name='Repetidos', index=False
                 )
         
         # Resetar ponteiro e ler dados
