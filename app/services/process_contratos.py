@@ -153,6 +153,130 @@ def remove_general_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ========================================
+# ✅ NOVA FUNÇÃO: FILTRO HABITACIONAL (COLUNAS W E Y)
+# ========================================
+def apply_habitacional_filter(
+    df: pd.DataFrame,
+    bank_type: str,
+    reference_date: Optional[str] = None,
+    months_back: int = 2
+) -> pd.DataFrame:
+    """
+    ✅ CORREÇÃO CRÍTICA: Aplica filtro habitacional verificando colunas W e Y.
+    
+    - BEMGE: Verifica coluna W (índice 22) E coluna Y (índice 24) com OR lógico
+    - MINAS CAIXA: Verifica coluna Y (índice 24) obrigatoriamente
+    
+    Args:
+        df: DataFrame a ser filtrado
+        bank_type: 'bemge' ou 'minas_caixa'
+        reference_date: Data de referência no formato "YYYY-MM-DD"
+        months_back: Número de meses para trás
+    
+    Returns:
+        DataFrame filtrado
+    """
+    if df.empty or not reference_date:
+        logger.debug("Filtro habitacional: DataFrame vazio ou sem data de referência")
+        return df
+    
+    initial_count = len(df)
+    logger.info(f"🔍 APLICANDO FILTRO HABITACIONAL ({bank_type.upper()})")
+    logger.info(f"   Registros iniciais: {initial_count}")
+    logger.info(f"   Data referência: {reference_date}")
+    logger.info(f"   Meses atrás: {months_back}")
+    
+    try:
+        # Calcular intervalo de datas
+        data_ref = datetime.strptime(reference_date, "%Y-%m-%d").date()
+        data_corte = data_ref - relativedelta(months=months_back)
+        
+        logger.info(f"   Intervalo: {data_corte} até {data_ref}")
+        
+        # Determinar quais colunas verificar
+        columns_to_check = []
+        
+        if bank_type == 'bemge':
+            # BEMGE: Verificar W (22) E Y (24)
+            logger.info(f"   BEMGE: Verificando colunas W (índice 22) e Y (índice 24)")
+            if len(df.columns) > 22:
+                columns_to_check.append((22, 'W'))
+            if len(df.columns) > 24:
+                columns_to_check.append((24, 'Y'))
+        
+        elif bank_type == 'minas_caixa':
+            # MINAS CAIXA: Verificar Y (24) obrigatória
+            logger.info(f"   MINAS CAIXA: Verificando coluna Y (índice 24)")
+            if len(df.columns) > 24:
+                columns_to_check.append((24, 'Y'))
+        
+        if not columns_to_check:
+            logger.warning(f"   ⚠️  Colunas habitacionais não encontradas!")
+            logger.warning(f"   Total de colunas no DataFrame: {len(df.columns)}")
+            return df
+        
+        # Criar máscara combinada (OR lógico entre colunas)
+        combined_mask = pd.Series(False, index=df.index)
+        found_valid_data = False
+        
+        for col_idx, col_name in columns_to_check:
+            col = df.columns[col_idx]
+            logger.info(f"   Processando coluna {col_name} (índice {col_idx}): '{col}'")
+            
+            # Tentar converter para datetime
+            parsed_dates = pd.to_datetime(df[col], errors='coerce')
+            valid_dates = parsed_dates.notna().sum()
+            
+            logger.info(f"      Datas válidas: {valid_dates}/{initial_count}")
+            
+            if valid_dates == 0:
+                logger.warning(f"      ⚠️  Nenhuma data válida nesta coluna")
+                continue
+            
+            found_valid_data = True
+            
+            # Mostrar range de datas
+            min_date = parsed_dates.min()
+            max_date = parsed_dates.max()
+            logger.info(f"      Range de datas: {min_date.date()} até {max_date.date()}")
+            
+            # Criar máscara para esta coluna
+            mask = (
+                parsed_dates.notna()
+                & (parsed_dates >= pd.Timestamp(data_corte))
+                & (parsed_dates <= pd.Timestamp(data_ref))
+            )
+            
+            # OR lógico com máscara combinada
+            combined_mask |= mask
+            
+            logger.info(f"      ✅ {mask.sum()} registros no intervalo nesta coluna")
+        
+        if not found_valid_data:
+            logger.warning(f"   ⚠️  Nenhuma coluna com datas válidas encontrada")
+            return df
+        
+        # Aplicar máscara combinada
+        df_filtrado = df[combined_mask].copy()
+        result_count = len(df_filtrado)
+        
+        logger.info(f"   ✅ FILTRO HABITACIONAL APLICADO")
+        logger.info(f"   Registros que passaram: {result_count}/{initial_count}")
+        logger.info(f"   Registros removidos: {initial_count - result_count}")
+        
+        if result_count == 0:
+            logger.warning(f"   ⚠️  WARNING: Nenhum registro passou no filtro habitacional!")
+            logger.warning(f"   Verifique se a data de referência está correta")
+        
+        return df_filtrado
+        
+    except Exception as e:
+        logger.error(f"   ❌ ERRO no filtro habitacional: {e}")
+        logger.error(f"   Retornando dados originais")
+        return df
+
+
 def filter_by_period(
     df: pd.DataFrame, 
     reference_date: str = None, 
@@ -160,7 +284,7 @@ def filter_by_period(
     date_column: str = None
 ) -> pd.DataFrame:
     """
-    Filtra contratos por período baseado na coluna de data de manifestação.
+    ✅ CORRIGIDO: Filtra contratos por período com logs detalhados.
     Coluna AG (índice 32) = DT.MANIFESTACAO
     
     Args:
@@ -174,6 +298,12 @@ def filter_by_period(
     """
     if df.empty:
         return df
+    
+    initial_count = len(df)
+    logger.info(f"🔍 APLICANDO FILTRO DE PERÍODO")
+    logger.info(f"   Registros iniciais: {initial_count}")
+    logger.info(f"   Data referência: {reference_date or 'Data atual'}")
+    logger.info(f"   Meses atrás: {months_back}")
     
     # Tentar encontrar a coluna de data de manifestação
     possible_cols = ['DT.MANIFESTACAO', 'DT.MANIFESTAÇÃO', 'DATA MANIFESTACAO', 'DATA MANIFESTAÇÃO']
@@ -193,8 +323,13 @@ def filter_by_period(
             logger.debug(f"Usando coluna índice 32 para filtro de data: {col_manifestacao}")
     
     if col_manifestacao is None:
-        logger.warning("Coluna de data de manifestação não encontrada para filtro de período")
+        logger.warning("   ⚠️  WARNING: Coluna de data de manifestação não encontrada")
+        logger.warning(f"   Candidatos: {possible_cols}")
+        logger.warning(f"   Colunas disponíveis: {list(df.columns[:15])}...")
+        logger.warning("   ❌ Filtro de período NÃO aplicado")
         return df
+    
+    logger.info(f"   ✅ Coluna de período encontrada: '{col_manifestacao}'")
     
     try:
         # Determinar data de referência
@@ -210,23 +345,46 @@ def filter_by_period(
         # Calcular data de corte
         data_corte = data_ref - relativedelta(months=months_back)
         
-        logger.debug(f"Filtrando contratos: data_ref={data_ref}, months_back={months_back}, data_corte={data_corte}")
+        logger.info(f"   Intervalo: {data_corte} até {data_ref}")
         
         # Converter coluna para datetime se ainda não estiver
         df_temp = df.copy()
         if df_temp[col_manifestacao].dtype == 'object' or not hasattr(df_temp[col_manifestacao].iloc[0] if len(df_temp) > 0 else None, 'year'):
             df_temp[col_manifestacao] = pd.to_datetime(df_temp[col_manifestacao], errors='coerce')
         
+        # Verificar datas válidas
+        valid_dates = df_temp[col_manifestacao].notna().sum()
+        logger.info(f"   Datas válidas: {valid_dates}/{initial_count}")
+        
+        if valid_dates == 0:
+            logger.warning("   ⚠️  WARNING: Nenhuma data válida encontrada")
+            logger.warning("   ❌ Filtro de período NÃO aplicado")
+            return df
+        
+        # Mostrar range de datas
+        if valid_dates > 0:
+            min_date = df_temp[col_manifestacao].min()
+            max_date = df_temp[col_manifestacao].max()
+            logger.info(f"   Range de datas nos dados: {min_date.date()} até {max_date.date()}")
+        
         # Filtrar pelo período
         mask = df_temp[col_manifestacao] >= pd.Timestamp(data_corte)
         df_filtrado = df[mask].copy()
         
-        logger.debug(f"Filtro de período ({months_back} meses): {len(df)} -> {len(df_filtrado)} linhas")
+        result_count = len(df_filtrado)
+        logger.info(f"   ✅ FILTRO DE PERÍODO APLICADO")
+        logger.info(f"   Registros que passaram: {result_count}/{initial_count}")
+        logger.info(f"   Registros removidos: {initial_count - result_count}")
+        
+        if result_count == 0:
+            logger.warning("   ⚠️  WARNING: Nenhum registro no intervalo especificado!")
+            logger.warning("   Verifique se a data de referência está correta")
         
         return df_filtrado
         
     except Exception as e:
-        logger.error(f"Erro ao filtrar por período: {e}")
+        logger.error(f"   ❌ ERRO ao filtrar por período: {e}")
+        logger.error("   Retornando dados originais")
         return df
 
 
@@ -533,27 +691,39 @@ def filtrar_planilha_contratos(
     months_back: int = 2,
     aplicar_habitacional: bool = False,
     aplicar_3026_15: bool = False,
-    date_column: str = None
+    date_column: str = None,
+    bank_type: str = None
 ) -> pd.DataFrame:
     """
-    Aplica filtros condicionais em um DataFrame de contratos.
+    ✅ CORRIGIDO: Aplica filtros condicionais em um DataFrame de contratos.
+    Agora inclui filtro habitacional (colunas W e Y).
     """
     if df.empty:
         return df
 
     df_filtrado = df.copy()
 
+    # Filtro de período
     if aplicar_periodo:
         df_filtrado = filter_by_period(df_filtrado, reference_date, months_back, date_column)
 
-    if aplicar_habitacional:
-        valores_filtro = {'0X0', '1X4', '6X4', '8X4'}
-        filter_cols = ['DEST.PAGAM', 'DEST.COMPLEM']
-        for col in filter_cols:
-            if col in df_filtrado.columns and len(df_filtrado) > 0:
-                df_filtrado[col] = df_filtrado[col].astype(str).str.upper().str.strip()
-                mask = ~df_filtrado[col].isin(valores_filtro)
-                df_filtrado = df_filtrado[mask].copy()
+    # ✅ NOVO: Filtro habitacional (colunas W e Y)
+    if aplicar_habitacional and bank_type:
+        df_filtrado = apply_habitacional_filter(
+            df_filtrado,
+            bank_type=bank_type,
+            reference_date=reference_date,
+            months_back=months_back
+        )
+
+    # Filtro de DEST.PAGAM e DEST.COMPLEM (mantido do original)
+    valores_filtro = {'0X0', '1X4', '6X4', '8X4'}
+    filter_cols = ['DEST.PAGAM', 'DEST.COMPLEM']
+    for col in filter_cols:
+        if col in df_filtrado.columns and len(df_filtrado) > 0:
+            df_filtrado[col] = df_filtrado[col].astype(str).str.upper().str.strip()
+            mask = ~df_filtrado[col].isin(valores_filtro)
+            df_filtrado = df_filtrado[mask].copy()
 
     if aplicar_3026_15 and 'TIPO_ARQUIVO' in df_filtrado.columns:
         df_filtrado = df_filtrado[df_filtrado['TIPO_ARQUIVO'] == '3026-15'].copy()
@@ -831,10 +1001,14 @@ async def process_contratos(
     file_type: str = "todos",
     period_filter_enabled: str = "false",
     reference_date: str = None,
-    months_back: int = 2
+    months_back: int = 2,
+    habitacional_filter_enabled: str = "false",  # ✅ NOVO PARÂMETRO
+    habitacional_reference_date: str = None,      # ✅ NOVO PARÂMETRO
+    habitacional_months_back: int = 2             # ✅ NOVO PARÂMETRO
 ) -> StreamingResponse:
     """
-    Processa múltiplas planilhas Excel de contratos.
+    ✅ CORRIGIDO: Processa múltiplas planilhas Excel de contratos.
+    Agora com suporte a filtro habitacional (colunas W e Y).
     
     Args:
         files: Lista de arquivos Excel
@@ -844,14 +1018,28 @@ async def process_contratos(
         period_filter_enabled: "true" ou "false" - Ativa filtro de período
         reference_date: Data de referência no formato "YYYY-MM-DD"
         months_back: Número de meses para trás (1, 2, 3, 4, 5, 6 ou 12)
+        habitacional_filter_enabled: "true" ou "false" - Ativa filtro habitacional (NOVO)
+        habitacional_reference_date: Data de referência para filtro habitacional (NOVO)
+        habitacional_months_back: Número de meses para filtro habitacional (NOVO)
     
     Returns:
         StreamingResponse com arquivo Excel consolidado
     """
     try:
-        logger.info(f"Iniciando processamento: bank_type={bank_type}, filter_type={filter_type}, file_type={file_type}")
-        logger.info(f"Filtro de período: enabled={period_filter_enabled}, reference_date={reference_date}, months_back={months_back}")
-        logger.info(f"Arquivos recebidos: {[f.filename for f in files]}")
+        logger.info(f"========================================")
+        logger.info(f"INICIANDO PROCESSAMENTO DE CONTRATOS")
+        logger.info(f"========================================")
+        logger.info(f"Banco: {bank_type}")
+        logger.info(f"Filtro: {filter_type}")
+        logger.info(f"Tipo de arquivo: {file_type}")
+        logger.info(f"Filtro de período: {period_filter_enabled}")
+        logger.info(f"Data referência: {reference_date}")
+        logger.info(f"Meses atrás: {months_back}")
+        logger.info(f"✅ Filtro habitacional: {habitacional_filter_enabled}")  # NOVO
+        logger.info(f"✅ Data referência habitacional: {habitacional_reference_date}")  # NOVO
+        logger.info(f"✅ Meses atrás habitacional: {habitacional_months_back}")  # NOVO
+        logger.info(f"Arquivos: {[f.filename for f in files]}")
+        logger.info(f"========================================")
         
         # Validar bank_type
         bank_type_normalized = bank_type.lower().replace(" ", "_")
@@ -882,8 +1070,16 @@ async def process_contratos(
                 detail="period_filter_enabled deve ser 'true' ou 'false'"
             )
         
+        # ✅ Validar habitacional_filter_enabled
+        if habitacional_filter_enabled not in ['true', 'false']:
+            raise HTTPException(
+                status_code=400,
+                detail="habitacional_filter_enabled deve ser 'true' ou 'false'"
+            )
+        
         # Converter para booleano
         period_filter_active = period_filter_enabled == "true"
+        habitacional_filter_active = habitacional_filter_enabled == "true"  # ✅ NOVO
         
         # Validar se pelo menos um arquivo foi enviado
         if not files or len(files) == 0:
@@ -930,7 +1126,9 @@ async def process_contratos(
             filename = file.filename
             filename_upper = filename.upper()
             
-            logger.debug(f"Processando arquivo: {filename}")
+            logger.info(f"\n{'='*60}")
+            logger.info(f"📄 PROCESSANDO ARQUIVO: {filename}")
+            logger.info(f"{'='*60}")
             
             # Filtrar por tipo de arquivo se especificado
             if file_type != "todos":
@@ -943,9 +1141,9 @@ async def process_contratos(
             try:
                 contents = await file.read()
                 df = pd.read_excel(io.BytesIO(contents), engine='openpyxl')
-                logger.debug(f"Arquivo lido: {len(df)} linhas, {len(df.columns)} colunas")
+                logger.info(f"✅ Arquivo lido: {len(df)} linhas, {len(df.columns)} colunas")
             except Exception as e:
-                logger.error(f"Erro ao ler arquivo {filename}: {e}")
+                logger.error(f"❌ Erro ao ler arquivo {filename}: {e}")
                 raise HTTPException(
                     status_code=400,
                     detail=f"Erro ao ler arquivo {filename}: {str(e)}"
@@ -962,17 +1160,20 @@ async def process_contratos(
             
             # Detectar tipo de arquivo
             detected_file_type = detect_file_type(filename)
+            logger.info(f"Tipo detectado: {detected_file_type}")
             
             if detected_file_type == '3026-11':
                 df_processado, total_linhas, total_unicos, total_duplicados = process_3026_11(df, bank_name)
 
                 if df_processado.empty:
+                    logger.warning(f"⚠️  Arquivo {filename} resultou em DataFrame vazio")
                     continue
 
                 df_processado['TIPO_ARQUIVO'] = '3026-11'
                 df_processado['BANCO'] = bank_name
                 df_processado['DUPLICADO'] = df_processado['CONTRATO'].duplicated(keep=False)
 
+                # Filtro por tipo (auditado/nauditado/todos)
                 if filter_type != 'todos' and 'AUDITADO' in df_processado.columns:
                     df_processado['AUDITADO'] = df_processado['AUDITADO'].astype(str).str.upper().str.strip()
                     if filter_type == 'auditado':
@@ -984,7 +1185,22 @@ async def process_contratos(
                             df_processado['AUDITADO'].isin(['NAUD', 'NAO AUDITADO', 'NAUDITADO'])
                         ].copy()
 
+                # ✅ APLICAR FILTRO HABITACIONAL (NOVO)
+                if habitacional_filter_active:
+                    logger.info(f"\n✅ APLICANDO FILTRO HABITACIONAL PARA 3026-11")
+                    df_processado = filtrar_planilha_contratos(
+                        df_processado,
+                        aplicar_periodo=False,
+                        aplicar_habitacional=True,
+                        reference_date=habitacional_reference_date,
+                        months_back=habitacional_months_back,
+                        bank_type=bank_type_normalized
+                    )
+                    logger.info(f"✅ Filtro habitacional aplicado: {len(df_processado)} registros")
+
+                # Filtro de período
                 if period_filter_active:
+                    logger.info(f"\n📅 APLICANDO FILTRO DE PERÍODO")
                     df_processado = filtrar_planilha_contratos(
                         df_processado,
                         aplicar_periodo=True,
@@ -1002,11 +1218,14 @@ async def process_contratos(
                 if 'AUDITADO' in df_processado.columns:
                     filepath_filtragem = filtragem_dir / save_filename
                     save_processed_file(df_processado, str(filepath_filtragem))
+                
+                logger.info(f"✅ 3026-11 processado: {len(df_processado)} registros finais")
 
             elif detected_file_type == '3026-15':
                 df_processado, total_linhas, total_unicos, total_duplicados = process_3026_15(df, bank_name)
 
                 if df_processado.empty:
+                    logger.warning(f"⚠️  Arquivo {filename} resultou em DataFrame vazio")
                     continue
 
                 df_processado['TIPO_ARQUIVO'] = '3026-15'
@@ -1025,6 +1244,7 @@ async def process_contratos(
                         ].copy()
 
                 if period_filter_active:
+                    logger.info(f"\n📅 APLICANDO FILTRO DE PERÍODO")
                     df_processado = filtrar_planilha_contratos(
                         df_processado,
                         aplicar_periodo=True,
@@ -1042,6 +1262,8 @@ async def process_contratos(
                 if 'AUDITADO' in df_processado.columns:
                     filepath_filtragem = filtragem_dir / save_filename
                     save_processed_file(df_processado, str(filepath_filtragem))
+                
+                logger.info(f"✅ 3026-15 processado: {len(df_processado)} registros finais")
 
             elif detected_file_type == '3026-12':
                 resultados = processar_3026_12_com_abas(
@@ -1086,6 +1308,8 @@ async def process_contratos(
                         save_processed_file(df_para_salvar, str(filepath_filtragem))
                     else:
                         logger.debug(f"Filtragem removeu todos os contratos para {tipo_label}, não salvando arquivo filtrado.")
+                
+                logger.info(f"✅ 3026-12 processado com sucesso")
         
         # Consolidar todos os dados
         if not all_contratos:
@@ -1096,6 +1320,9 @@ async def process_contratos(
 
         df_full = pd.concat(all_contratos, ignore_index=True)
 
+        logger.info(f"\n{'='*60}")
+        logger.info(f"📊 CONSOLIDAÇÃO FINAL")
+        logger.info(f"{'='*60}")
         logger.info(f"Total de contratos consolidados: {len(df_full)}")
 
         df_filtrado = df_full.copy()
@@ -1132,9 +1359,13 @@ async def process_contratos(
         df_repetidos = gerar_contratos_repetidos(df_full)
         df_contratos_por_banco = gerar_contratos_por_banco(df_full)
         
+        logger.info(f"✅ Dados filtrados: {len(df_filtrado)} registros")
+        logger.info(f"✅ Resumos gerados com sucesso")
         
         # Criar arquivo Excel consolidado
         output = io.BytesIO()
+
+        logger.info(f"\n📝 Criando arquivo Excel consolidado...")
 
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             if not df_resumo.empty:
@@ -1252,10 +1483,16 @@ async def process_contratos(
             tipo_nome = file_type.upper().replace("-", "_")
         
         periodo_nome = f"_{months_back}MESES" if period_filter_active else ""
+        habitacional_nome = "_HABITACIONAL" if habitacional_filter_active else ""  # ✅ NOVO
         
-        filename_output = f"contratos_{tipo_nome}_{banco_nome}_{filtro_nome}{periodo_nome}_consolidado.xlsx"
+        filename_output = f"contratos_{tipo_nome}_{banco_nome}_{filtro_nome}{periodo_nome}{habitacional_nome}_consolidado.xlsx"
         
-        logger.info(f"Processamento concluído. Arquivo: {filename_output}")
+        logger.info(f"\n{'='*60}")
+        logger.info(f"✅ PROCESSAMENTO CONCLUÍDO COM SUCESSO")
+        logger.info(f"{'='*60}")
+        logger.info(f"Arquivo gerado: {filename_output}")
+        logger.info(f"Total de registros finais: {len(df_filtrado)}")
+        logger.info(f"{'='*60}\n")
         
         return StreamingResponse(
             io.BytesIO(excel_data),
@@ -1268,7 +1505,10 @@ async def process_contratos(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Erro ao processar contratos: {e}")
+        logger.error(f"❌ ERRO CRÍTICO ao processar contratos: {e}")
+        logger.error(f"Tipo do erro: {type(e).__name__}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=500,
             detail=f"Erro ao processar contratos: {str(e)}"
