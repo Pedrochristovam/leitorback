@@ -75,10 +75,14 @@ async def processar_contratos_endpoint(
     period_filter_enabled: str = Form("false"),
     reference_date: Optional[str] = Form(None),
     months_back: int = Form(2),
+    habitacional_filter_enabled: str = Form("false"),  # ✅ NOVO
+    habitacional_reference_date: Optional[str] = Form(None),  # ✅ NOVO
+    habitacional_months_back: int = Form(2),  # ✅ NOVO
     files: List[UploadFile] = File(...)
 ):
     """
-    Processa múltiplas planilhas Excel de contratos.
+    ✅ ATUALIZADO: Processa múltiplas planilhas Excel de contratos.
+    Agora com suporte a filtro habitacional (colunas W e Y).
     
     Recebe:
     - bank_type: "bemge" ou "minas_caixa" (Form)
@@ -87,6 +91,9 @@ async def processar_contratos_endpoint(
     - period_filter_enabled: "true" ou "false" (Form) - Ativa filtro de período
     - reference_date: "YYYY-MM-DD" (Form) - Data de referência para o filtro
     - months_back: 1, 2, 3, 4, 5, 6 ou 12 (Form) - Meses para trás
+    - habitacional_filter_enabled: "true" ou "false" (Form) - Ativa filtro habitacional (NOVO)
+    - habitacional_reference_date: "YYYY-MM-DD" (Form) - Data de referência habitacional (NOVO)
+    - habitacional_months_back: 1, 2, 3, 4, 5, 6 ou 12 (Form) - Meses para trás habitacional (NOVO)
     - files: Lista de arquivos Excel (File)
     
     Retorna:
@@ -109,6 +116,13 @@ async def processar_contratos_endpoint(
             detail="period_filter_enabled deve ser 'true' ou 'false'"
         )
     
+    # ✅ Validar habitacional_filter_enabled
+    if habitacional_filter_enabled not in ["true", "false"]:
+        raise HTTPException(
+            status_code=400,
+            detail="habitacional_filter_enabled deve ser 'true' ou 'false'"
+        )
+    
     # Validar months_back
     if months_back not in [1, 2, 3, 4, 5, 6, 12]:
         raise HTTPException(
@@ -116,11 +130,25 @@ async def processar_contratos_endpoint(
             detail="months_back deve ser 1, 2, 3, 4, 5, 6 ou 12"
         )
     
+    # ✅ Validar habitacional_months_back
+    if habitacional_months_back not in [1, 2, 3, 4, 5, 6, 12]:
+        raise HTTPException(
+            status_code=400,
+            detail="habitacional_months_back deve ser 1, 2, 3, 4, 5, 6 ou 12"
+        )
+    
     # Se filtro de período está ativo, reference_date é obrigatório
     if period_filter_enabled == "true" and not reference_date:
         raise HTTPException(
             status_code=400,
             detail="reference_date é obrigatório quando period_filter_enabled é 'true'"
+        )
+    
+    # ✅ Se filtro habitacional está ativo, habitacional_reference_date é obrigatório
+    if habitacional_filter_enabled == "true" and not habitacional_reference_date:
+        raise HTTPException(
+            status_code=400,
+            detail="habitacional_reference_date é obrigatório quando habitacional_filter_enabled é 'true'"
         )
     
     try:
@@ -131,7 +159,10 @@ async def processar_contratos_endpoint(
             file_type, 
             period_filter_enabled,
             reference_date,
-            months_back
+            months_back,
+            habitacional_filter_enabled,  # ✅ NOVO
+            habitacional_reference_date,   # ✅ NOVO
+            habitacional_months_back       # ✅ NOVO
         )
     except HTTPException:
         raise

@@ -734,75 +734,131 @@ def filtrar_planilha_contratos(
 def processar_3026_12_com_abas(
     df: pd.DataFrame,
     bank_name: str,
+    bank_type: str,
     period_filter_active: bool,
     reference_date: Optional[str],
     months_back: int
 ) -> dict:
-    resumo = process_3026_12(df, bank_name)
+    """
+    ✅ CORRIGIDO: Processa 3026-12 com tratamento robusto de erros
+    """
+    try:
+        resumo = process_3026_12(df, bank_name)
 
-    df_aud, total_aud, unicos_aud, duplicados_aud = resumo['aud']
-    df_naud, total_naud, unicos_naud, duplicados_naud = resumo['naud']
+        # Validar se resumo tem as chaves esperadas
+        if 'aud' not in resumo or 'naud' not in resumo:
+            logger.error(f"❌ Resumo de 3026-12 inválido. Chaves: {resumo.keys()}")
+            raise ValueError("Estrutura de resumo inválida para 3026-12")
 
-    def preparar_sub_df(sub_df: pd.DataFrame, tipo: str) -> pd.DataFrame:
-        if sub_df.empty:
-            return pd.DataFrame()
+        df_aud, total_aud, unicos_aud, duplicados_aud = resumo['aud']
+        df_naud, total_naud, unicos_naud, duplicados_naud = resumo['naud']
 
-        df_copy = sub_df.copy()
-        df_copy['BANCO'] = bank_name
-        df_copy['TIPO_ARQUIVO'] = '3026-12'
-        df_copy['AUDITADO_TIPO'] = 'AUD' if tipo == 'aud' else 'NAUD'
-        df_copy['DUPLICADO'] = df_copy['CONTRATO'].duplicated(keep=False)
-        return df_copy
+        logger.info(f"📊 3026-12 separado: AUD={len(df_aud)}, NAUD={len(df_naud)}")
 
-    df_aud_processado = preparar_sub_df(df_aud, 'aud')
-    df_naud_processado = preparar_sub_df(df_naud, 'naud')
+        def preparar_sub_df(sub_df: pd.DataFrame, tipo: str) -> pd.DataFrame:
+            if sub_df.empty:
+                logger.debug(f"DataFrame vazio para tipo {tipo}")
+                return pd.DataFrame()
 
-    dfs_para_todos = [df for df in [df_aud_processado, df_naud_processado] if not df.empty]
-    df_todos = pd.concat(dfs_para_todos, ignore_index=True) if dfs_para_todos else pd.DataFrame()
+            df_copy = sub_df.copy()
+            df_copy['BANCO'] = bank_name
+            df_copy['TIPO_ARQUIVO'] = '3026-12'
+            df_copy['AUDITADO_TIPO'] = 'AUD' if tipo == 'aud' else 'NAUD'
+            df_copy['DUPLICADO'] = df_copy['CONTRATO'].duplicated(keep=False)
+            logger.debug(f"Sub-dataframe preparado ({tipo}): {len(df_copy)} registros")
+            return df_copy
 
-    period_keys = {
-        'auditados_ultimos_2_meses': df_aud_processado,
-        'naud_ultimos_2_meses': df_naud_processado,
-        'todos_ultimos_2_meses': df_todos
-    }
+        df_aud_processado = preparar_sub_df(df_aud, 'aud')
+        df_naud_processado = preparar_sub_df(df_naud, 'naud')
 
-    periodos = {}
-    if period_filter_active:
-        for key, subset in period_keys.items():
-            periodos[key] = (
-                filtrar_planilha_contratos(
-                    subset,
+        dfs_para_todos = [df for df in [df_aud_processado, df_naud_processado] if not df.empty]
+        df_todos = pd.concat(dfs_para_todos, ignore_index=True) if dfs_para_todos else pd.DataFrame()
+
+        logger.info(f"📊 DataFrame TODOS: {len(df_todos)} registros")
+
+        # Criar dicionário de períodos
+        periodos = {}
+        
+        if period_filter_active:
+            logger.info(f"🔍 Aplicando filtro de período para 3026-12...")
+            
+            # Filtrar auditados
+            if not df_aud_processado.empty:
+                logger.info(f"   Filtrando AUD: {len(df_aud_processado)} registros iniciais")
+                periodos['auditados_ultimos_2_meses'] = filtrar_planilha_contratos(
+                    df_aud_processado,
                     aplicar_periodo=True,
                     reference_date=reference_date,
-                    months_back=months_back
-                ) if not subset.empty else pd.DataFrame()
-            )
-    else:
-        for key in period_keys:
-            periodos[key] = pd.DataFrame()
+                    months_back=months_back,
+                    bank_type=bank_type
+                )
+                logger.info(f"   AUD filtrado: {len(periodos['auditados_ultimos_2_meses'])} registros")
+            else:
+                periodos['auditados_ultimos_2_meses'] = pd.DataFrame()
+            
+            # Filtrar não auditados
+            if not df_naud_processado.empty:
+                logger.info(f"   Filtrando NAUD: {len(df_naud_processado)} registros iniciais")
+                periodos['naud_ultimos_2_meses'] = filtrar_planilha_contratos(
+                    df_naud_processado,
+                    aplicar_periodo=True,
+                    reference_date=reference_date,
+                    months_back=months_back,
+                    bank_type=bank_type
+                )
+                logger.info(f"   NAUD filtrado: {len(periodos['naud_ultimos_2_meses'])} registros")
+            else:
+                periodos['naud_ultimos_2_meses'] = pd.DataFrame()
+            
+            # Filtrar todos
+            if not df_todos.empty:
+                logger.info(f"   Filtrando TODOS: {len(df_todos)} registros iniciais")
+                periodos['todos_ultimos_2_meses'] = filtrar_planilha_contratos(
+                    df_todos,
+                    aplicar_periodo=True,
+                    reference_date=reference_date,
+                    months_back=months_back,
+                    bank_type=bank_type
+                )
+                logger.info(f"   TODOS filtrado: {len(periodos['todos_ultimos_2_meses'])} registros")
+            else:
+                periodos['todos_ultimos_2_meses'] = pd.DataFrame()
+        else:
+            logger.info("ℹ️  Filtro de período desativado para 3026-12")
+            periodos['auditados_ultimos_2_meses'] = pd.DataFrame()
+            periodos['naud_ultimos_2_meses'] = pd.DataFrame()
+            periodos['todos_ultimos_2_meses'] = pd.DataFrame()
 
-    logger.debug("Abas 3026-12 construídas para todos/auditados/nauditados")
+        logger.info("✅ Abas 3026-12 construídas com sucesso")
 
-    return {
-        'abas': {
-            'todos': df_todos,
-            'auditados': df_aud_processado,
-            'naud': df_naud_processado,
-            **periodos
-        },
-        'stats': {
-            'aud': {
-                'total_linhas': total_aud,
-                'total_unicos': unicos_aud,
-                'total_duplicados': duplicados_aud
+        return {
+            'abas': {
+                'todos': df_todos,
+                'aud': df_aud_processado,  # ✅ Mudado de 'auditados' para 'aud'
+                'naud': df_naud_processado,
+                'auditados_ultimos_2_meses': periodos['auditados_ultimos_2_meses'],
+                'naud_ultimos_2_meses': periodos['naud_ultimos_2_meses'],
+                'todos_ultimos_2_meses': periodos['todos_ultimos_2_meses']
             },
-            'naud': {
-                'total_linhas': total_naud,
-                'total_unicos': unicos_naud,
-                'total_duplicados': duplicados_naud
+            'stats': {
+                'aud': {
+                    'total_linhas': total_aud,
+                    'total_unicos': unicos_aud,
+                    'total_duplicados': duplicados_aud
+                },
+                'naud': {
+                    'total_linhas': total_naud,
+                    'total_unicos': unicos_naud,
+                    'total_duplicados': duplicados_naud
+                }
             }
         }
-    }
+    
+    except Exception as e:
+        logger.error(f"❌ ERRO em processar_3026_12_com_abas: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise
 
 
 def gerar_resumo_geral(df_full: pd.DataFrame) -> pd.DataFrame:
@@ -1266,9 +1322,12 @@ async def process_contratos(
                 logger.info(f"✅ 3026-15 processado: {len(df_processado)} registros finais")
 
             elif detected_file_type == '3026-12':
+                logger.info(f"🔧 Processando 3026-12...")
+                
                 resultados = processar_3026_12_com_abas(
                     df,
                     bank_name,
+                    bank_type_normalized,
                     period_filter_active,
                     reference_date,
                     months_back
@@ -1277,37 +1336,67 @@ async def process_contratos(
                 stats = resultados['stats']
                 tem_3026_12 = True
 
-                for chave, subset in abas.items():
-                    if subset.empty:
-                        continue
-                    dados_3026_12[chave].append(subset.copy())
+                logger.info(f"📋 Abas disponíveis: {list(abas.keys())}")
 
-                for tipo_label, subset_key in [('AUD', 'auditados'), ('NAUD', 'naud')]:
-                    df_subset = abas.get(subset_key)
+                # Mapear nomes de chaves corretamente
+                chaves_para_dados = {
+                    'todos': 'todos',
+                    'aud': 'auditados',  # ✅ Mapeamento correto
+                    'naud': 'naud',
+                    'auditados_ultimos_2_meses': 'auditados_ultimos_2_meses',
+                    'naud_ultimos_2_meses': 'naud_ultimos_2_meses',
+                    'todos_ultimos_2_meses': 'todos_ultimos_2_meses'
+                }
+
+                for chave_aba, chave_dados in chaves_para_dados.items():
+                    if chave_aba in abas:
+                        subset = abas[chave_aba]
+                        if not subset.empty:
+                            logger.info(f"   Adicionando {chave_dados}: {len(subset)} registros")
+                            dados_3026_12[chave_dados].append(subset.copy())
+                        else:
+                            logger.debug(f"   {chave_dados} está vazio")
+
+                # Processar AUD e NAUD para salvar arquivos individuais
+                for tipo_label, subset_key_aba, subset_key_stats in [
+                    ('AUD', 'aud', 'aud'), 
+                    ('NAUD', 'naud', 'naud')
+                ]:
+                    df_subset = abas.get(subset_key_aba)
                     if df_subset is None or df_subset.empty:
+                        logger.warning(f"   ⚠️  Subset {tipo_label} está vazio ou não existe")
                         continue
 
-                    df_para_salvar = (
-                        filtrar_planilha_contratos(
-                            df_subset,
-                            aplicar_periodo=period_filter_active,
+                    logger.info(f"   Processando {tipo_label}: {len(df_subset)} registros")
+
+                    # Adicionar a all_contratos (sem filtro adicional para não duplicar)
+                    all_contratos.append(df_subset.copy())
+
+                    # Para salvar, aplicar filtro se necessário
+                    df_para_salvar = df_subset.copy()
+                    
+                    if period_filter_active:
+                        logger.info(f"      Aplicando filtro de período em {tipo_label}...")
+                        df_para_salvar = filtrar_planilha_contratos(
+                            df_para_salvar,
+                            aplicar_periodo=True,
                             reference_date=reference_date,
-                            months_back=months_back
-                        ) if period_filter_active else df_subset.copy()
-                    )
+                            months_back=months_back,
+                            bank_type=bank_type_normalized
+                        )
+                        logger.info(f"      {tipo_label} após filtro: {len(df_para_salvar)} registros")
 
-                    all_contratos.append(df_subset)
-
-                    total_unicos = stats[subset_key]['total_unicos']
+                    total_unicos = stats[subset_key_stats]['total_unicos']
                     save_filename = f"3026-12 - {bank_name} - {tipo_label} - {total_unicos} (CONTRATOS).xlsx"
                     save_filepath = base_dir / save_filename
 
                     if not df_para_salvar.empty:
+                        logger.info(f"      Salvando {tipo_label}: {save_filename}")
                         save_processed_file(df_para_salvar, str(save_filepath))
                         filepath_filtragem = filtragem_dir / save_filename
                         save_processed_file(df_para_salvar, str(filepath_filtragem))
                     else:
-                        logger.debug(f"Filtragem removeu todos os contratos para {tipo_label}, não salvando arquivo filtrado.")
+                        logger.warning(f"      ⚠️  {tipo_label} vazio após filtragem, não salvando arquivo")
                 
                 logger.info(f"✅ 3026-12 processado com sucesso")
         
