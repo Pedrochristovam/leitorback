@@ -1,11 +1,13 @@
 import pandas as pd
+import numpy as np
 import io
 import os
 import re
 import logging
+import unicodedata
 from typing import List, Optional
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
 from fastapi import HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
@@ -75,14 +77,47 @@ def get_bank_name(bank_type: str) -> str:
     return bank_names.get(bank_type, bank_type.upper())
 
 
+def _normalize_bank_type_key(bank_type: str) -> str:
+    if not bank_type:
+        return ''
+    bt = bank_type.strip().lower().replace(' ', '_').replace('-', '_')
+    if bt in ('minascaixa', 'minas', 'mc', 'caixa_minas', 'caixa'):
+        return 'minas_caixa'
+    if bt in ('bem_ge',):
+        return 'bemge'
+    return bt
+
+
+def _cell_id_string(x) -> str:
+    """Converte célula (contrato / ID numérico do Excel) em string sem perder dígitos por float."""
+    if pd.isna(x):
+        return ''
+    if isinstance(x, str):
+        s = x.strip()
+        if len(s) > 2 and s.endswith('.0') and s[:-2].lstrip('-').isdigit():
+            return s[:-2]
+        return s
+    if isinstance(x, (int, np.integer)):
+        return str(int(x))
+    if isinstance(x, float):
+        if not np.isfinite(x):
+            return ''
+        xr = round(x)
+        if abs(x - xr) < 1e-6:
+            if abs(xr) >= 1e15:
+                return f'{x:.0f}'
+            return str(int(xr))
+        s = str(x).strip().rstrip('0').rstrip('.')
+        return s
+    return str(x).strip()
+
+
 def format_contrato_column(df: pd.DataFrame) -> pd.DataFrame:
     """
     Formata a coluna CONTRATO como texto, preservando zeros à esquerda.
     """
     if 'CONTRATO' in df.columns:
-        df['CONTRATO'] = df['CONTRATO'].apply(
-            lambda x: str(int(x)) if pd.notna(x) and isinstance(x, (int, float)) else str(x) if pd.notna(x) else ''
-        )
+        df['CONTRATO'] = df['CONTRATO'].apply(_cell_id_string)
     return df
 
 
@@ -92,10 +127,68 @@ def format_column_d_as_text(df: pd.DataFrame) -> pd.DataFrame:
     """
     if len(df.columns) > 3:
         coluna_d = df.columns[3]
-        df[coluna_d] = df[coluna_d].apply(
-            lambda x: str(int(x)) if pd.notna(x) and isinstance(x, (int, float)) else str(x) if pd.notna(x) else ''
-        )
+        df[coluna_d] = df[coluna_d].apply(_cell_id_string)
     return df
+
+
+def _normalize_auditado_token(v) -> str:
+    if pd.isna(v):
+        return ''
+    t = str(v).strip().upper()
+    t = unicodedata.normalize('NFKD', t)
+    t = ''.join(c for c in t if not unicodedata.combining(c))
+    t = re.sub(r'\s+', '', t)
+    return t
+
+
+def resolve_manifestacao_column(
+    df: pd.DataFrame,
+    bank_type: Optional[str] = None,
+    date_column: Optional[str] = None
+) -> Optional[str]:
+    """
+    Descobre coluna de data para filtro de período (manifestação ou equivalente).
+    """
+    if df.empty:
+        return None
+    if date_column and date_column in df.columns:
+        return date_column
+
+    possible_cols = [
+        'DT.MANIFESTACAO', 'DT.MANIFESTAÇÃO', 'DATA MANIFESTACAO', 'DATA MANIFESTAÇÃO',
+    ]
+    for col in possible_cols:
+        if col in df.columns:
+            return col
+
+    for col in df.columns:
+        if 'MANIFEST' in str(col).upper():
+            return col
+
+    candidate_indices = [32, 31, 33, 30, 34, 29, 28, 35]
+    if bank_type == 'minas_caixa':
+        candidate_indices = [32, 31, 33, 30, 34, 29, 28] + [19, 23, 25]
+
+    best_col, best_score = None, 0.0
+    for idx in candidate_indices:
+        if len(df.columns) <= idx:
+            continue
+        col = df.columns[idx]
+        s = pd.to_datetime(df[col], errors='coerce', dayfirst=True)
+        score = float(s.notna().mean())
+        if score > best_score:
+            best_col, best_score = col, score
+
+    if best_col is not None and best_score >= 0.08:
+        logger.info(f"Coluna de período inferida ({best_score:.0%} válida): {best_col!r}")
+        return best_col
+
+    if bank_type != 'minas_caixa' and len(df.columns) > 32:
+        logger.debug(f"Fallback período coluna índice 32: {df.columns[32]!r}")
+        return df.columns[32]
+
+    logger.warning(f"Não foi possível inferir coluna de manifestação/período (bank_type={bank_type})")
+    return None
 
 
 def format_date_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -117,7 +210,7 @@ def format_date_columns(df: pd.DataFrame) -> pd.DataFrame:
         if col in colunas_data or col.upper().startswith('DT.') or col.upper().startswith('DATA'):
             try:
                 # Converter para datetime e extrair apenas a data
-                df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
+                df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=True).dt.date
                 logger.debug(f"Coluna de data formatada: {col}")
             except Exception as e:
                 logger.warning(f"Erro ao formatar coluna de data {col}: {e}")
@@ -134,7 +227,7 @@ def format_date_columns_by_index(df: pd.DataFrame, indices: list) -> pd.DataFram
         if len(df.columns) > idx:
             col = df.columns[idx]
             try:
-                df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
+                df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=True).dt.date
                 logger.debug(f"Coluna de data (índice {idx}) formatada: {col}")
             except Exception as e:
                 logger.warning(f"Erro ao formatar coluna de data índice {idx} ({col}): {e}")
@@ -225,7 +318,7 @@ def apply_habitacional_filter(
             logger.info(f"   Processando coluna {col_name} (índice {col_idx}): '{col}'")
             
             # Tentar converter para datetime
-            parsed_dates = pd.to_datetime(df[col], errors='coerce')
+            parsed_dates = pd.to_datetime(df[col], errors='coerce', dayfirst=True)
             valid_dates = parsed_dates.notna().sum()
             
             logger.info(f"      Datas válidas: {valid_dates}/{initial_count}")
@@ -281,20 +374,12 @@ def filter_by_period(
     df: pd.DataFrame, 
     reference_date: str = None, 
     months_back: int = 2,
-    date_column: str = None
+    date_column: str = None,
+    bank_type: Optional[str] = None
 ) -> pd.DataFrame:
     """
-    ✅ CORRIGIDO: Filtra contratos por período com logs detalhados.
-    Coluna AG (índice 32) = DT.MANIFESTACAO
-    
-    Args:
-        df: DataFrame a ser filtrado
-        reference_date: Data de referência no formato "YYYY-MM-DD" (se None, usa data atual)
-        months_back: Número de meses para trás (padrão: 2)
-        date_column: Nome da coluna de data (opcional)
-    
-    Returns:
-        DataFrame filtrado
+    Filtra contratos por período (manifestação ou coluna inferida).
+    Janela: [data_corte, data_referência] (inclusive), com data_corte = ref - months_back.
     """
     if df.empty:
         return df
@@ -305,26 +390,10 @@ def filter_by_period(
     logger.info(f"   Data referência: {reference_date or 'Data atual'}")
     logger.info(f"   Meses atrás: {months_back}")
     
-    # Tentar encontrar a coluna de data de manifestação
-    possible_cols = ['DT.MANIFESTACAO', 'DT.MANIFESTAÇÃO', 'DATA MANIFESTACAO', 'DATA MANIFESTAÇÃO']
-    
-    col_manifestacao = None
-    if date_column and date_column in df.columns:
-        col_manifestacao = date_column
-    else:
-        for col in possible_cols:
-            if col in df.columns:
-                col_manifestacao = col
-                break
-        
-        # Se não encontrou por nome, tentar por índice (AG = índice 32)
-        if col_manifestacao is None and len(df.columns) > 32:
-            col_manifestacao = df.columns[32]
-            logger.debug(f"Usando coluna índice 32 para filtro de data: {col_manifestacao}")
+    col_manifestacao = resolve_manifestacao_column(df, bank_type=bank_type, date_column=date_column)
     
     if col_manifestacao is None:
         logger.warning("   ⚠️  WARNING: Coluna de data de manifestação não encontrada")
-        logger.warning(f"   Candidatos: {possible_cols}")
         logger.warning(f"   Colunas disponíveis: {list(df.columns[:15])}...")
         logger.warning("   ❌ Filtro de período NÃO aplicado")
         return df
@@ -347,13 +416,11 @@ def filter_by_period(
         
         logger.info(f"   Intervalo: {data_corte} até {data_ref}")
         
-        # Converter coluna para datetime se ainda não estiver
         df_temp = df.copy()
-        if df_temp[col_manifestacao].dtype == 'object' or not hasattr(df_temp[col_manifestacao].iloc[0] if len(df_temp) > 0 else None, 'year'):
-            df_temp[col_manifestacao] = pd.to_datetime(df_temp[col_manifestacao], errors='coerce')
+        parsed = pd.to_datetime(df_temp[col_manifestacao], errors='coerce', dayfirst=True)
+        parsed_day = parsed.dt.floor('D')
         
-        # Verificar datas válidas
-        valid_dates = df_temp[col_manifestacao].notna().sum()
+        valid_dates = int(parsed.notna().sum())
         logger.info(f"   Datas válidas: {valid_dates}/{initial_count}")
         
         if valid_dates == 0:
@@ -361,14 +428,11 @@ def filter_by_period(
             logger.warning("   ❌ Filtro de período NÃO aplicado")
             return df
         
-        # Mostrar range de datas
-        if valid_dates > 0:
-            min_date = df_temp[col_manifestacao].min()
-            max_date = df_temp[col_manifestacao].max()
-            logger.info(f"   Range de datas nos dados: {min_date.date()} até {max_date.date()}")
+        min_date = parsed.min()
+        max_date = parsed.max()
+        logger.info(f"   Range de datas nos dados: {min_date.date()} até {max_date.date()}")
         
-        # Filtrar pelo período
-        mask = df_temp[col_manifestacao] >= pd.Timestamp(data_corte)
+        mask = (parsed_day >= pd.Timestamp(data_corte)) & (parsed_day <= pd.Timestamp(data_ref))
         df_filtrado = df[mask].copy()
         
         result_count = len(df_filtrado)
@@ -543,9 +607,7 @@ def process_3026_12(df: pd.DataFrame, bank_name: str) -> dict:
         coluna_b = df.columns[1]
         logger.debug(f"Coluna B (índice 1): {coluna_b}")
         # Converter para string, removendo .0 de números float
-        df[coluna_b] = df[coluna_b].apply(
-            lambda x: str(int(x)) if pd.notna(x) and isinstance(x, (int, float)) else str(x) if pd.notna(x) else ''
-        )
+        df[coluna_b] = df[coluna_b].apply(_cell_id_string)
         df[coluna_b] = df[coluna_b].str.strip()
         linhas_antes = len(df)
         
@@ -569,7 +631,8 @@ def process_3026_12(df: pd.DataFrame, bank_name: str) -> dict:
         logger.warning("DataFrame vazio após processamento inicial")
         return {
             'aud': (pd.DataFrame(), 0, 0, 0),
-            'naud': (pd.DataFrame(), 0, 0, 0)
+            'naud': (pd.DataFrame(), 0, 0, 0),
+            'todos_full': pd.DataFrame()
         }
     
     # 2. Formatar coluna D como texto
@@ -627,18 +690,37 @@ def process_3026_12(df: pd.DataFrame, bank_name: str) -> dict:
     filter_cols = ['DEST.PAGAM', 'DEST.COMPLEM']
     has_filter_cols = any(col in df.columns for col in filter_cols)
     
-    # Converter AUDITADO para string e normalizar
-    df[coluna_auditado] = df[coluna_auditado].astype(str).str.upper().str.strip()
+    # Tokens já no formato de _normalize_auditado_token (sem espaços / sem acentos)
+    aud_tokens = {
+        'AUDI', 'AUD', 'AUDITADO', 'AUDITADOS', 'AUDIT.', 'SIM', 'S',
+        '1', '1.0', 'TRUE', 'VERDADEIRO',
+    }
+    naud_tokens = {
+        'NAUD', 'NAUD.', 'NAOAUDITADO', 'NAUDITADO', 'NAOAUDITADOS', 'NAUDITADOS',
+        'NAO', '2', '2.0', 'FALSE', 'FALSO', 'NAOAUD.',
+    }
+    keys = df[coluna_auditado].map(_normalize_auditado_token)
+    extra_map = {_normalize_auditado_token(v) for v in df[coluna_auditado].unique() if pd.notna(v)}
+    logger.debug(f"AUDITADO chaves normalizadas (amostra): {list(extra_map)[:25]}")
     
-    # Verificar valores únicos de AUDITADO
-    valores_auditado = df[coluna_auditado].unique()
-    logger.debug(f"Valores únicos de AUDITADO: {valores_auditado}")
-    
-    # Separar em AUD e NAUD (aceitar variações)
-    df_aud = df[df[coluna_auditado].isin(['AUDI', 'AUD', 'AUDITADO'])].copy()
-    df_naud = df[df[coluna_auditado].isin(['NAUD', 'NAO AUDITADO', 'NAUDITADO', 'NÃO AUDITADO'])].copy()
+    df_aud = df[keys.isin(aud_tokens)].copy()
+    df_naud = df[keys.isin(naud_tokens)].copy()
     
     logger.debug(f"Após separação: AUD={len(df_aud)}, NAUD={len(df_naud)}")
+    
+    classified = keys.isin(aud_tokens) | keys.isin(naud_tokens)
+    n_unc = int((~classified).sum())
+    if n_unc:
+        amostra = df.loc[~classified, coluna_auditado].dropna().unique()[:8]
+        logger.warning(f"3026-12: {n_unc} linhas com AUDITADO não classificado; valores: {amostra}")
+    
+    df_todos_full = df.copy()
+    df_todos_full['BANCO'] = bank_name
+    df_todos_full['TIPO_ARQUIVO'] = '3026-12'
+    df_todos_full['AUDITADO_TIPO'] = keys.map(
+        lambda k: 'AUD' if k in aud_tokens else ('NAUD' if k in naud_tokens else 'INDEF')
+    )
+    df_todos_full['DUPLICADO'] = df_todos_full['CONTRATO'].duplicated(keep=False)
     
     # Aplicar filtros se as colunas existirem
     valores_filtro = ['0X0', '1X4', '6X4', '8X4', '0x0', '1x4', '6x4', '8x4']
@@ -680,7 +762,8 @@ def process_3026_12(df: pd.DataFrame, bank_name: str) -> dict:
     
     return {
         'aud': (df_aud_unicos, total_aud, unicos_aud, duplicados_aud),
-        'naud': (df_naud_unicos, total_naud, unicos_naud, duplicados_naud)
+        'naud': (df_naud_unicos, total_naud, unicos_naud, duplicados_naud),
+        'todos_full': df_todos_full
     }
 
 
@@ -705,7 +788,9 @@ def filtrar_planilha_contratos(
 
     # Filtro de período
     if aplicar_periodo:
-        df_filtrado = filter_by_period(df_filtrado, reference_date, months_back, date_column)
+        df_filtrado = filter_by_period(
+            df_filtrado, reference_date, months_back, date_column, bank_type=bank_type
+        )
 
     # ✅ NOVO: Filtro habitacional (colunas W e Y)
     if aplicar_habitacional and bank_type:
@@ -716,14 +801,19 @@ def filtrar_planilha_contratos(
             months_back=months_back
         )
 
-    # Filtro de DEST.PAGAM e DEST.COMPLEM (mantido do original)
+    # DEST.PAGAM / DEST.COMPLEM: regra do 3026-12 — não aplicar em 3026-11 / 3026-15
     valores_filtro = {'0X0', '1X4', '6X4', '8X4'}
     filter_cols = ['DEST.PAGAM', 'DEST.COMPLEM']
+    if 'TIPO_ARQUIVO' in df_filtrado.columns:
+        mask_somente_12 = df_filtrado['TIPO_ARQUIVO'].eq('3026-12')
+    else:
+        mask_somente_12 = pd.Series(True, index=df_filtrado.index)
     for col in filter_cols:
-        if col in df_filtrado.columns and len(df_filtrado) > 0:
-            df_filtrado[col] = df_filtrado[col].astype(str).str.upper().str.strip()
-            mask = ~df_filtrado[col].isin(valores_filtro)
-            df_filtrado = df_filtrado[mask].copy()
+        if col not in df_filtrado.columns or df_filtrado.empty:
+            continue
+        norm = df_filtrado[col].astype(str).str.upper().str.strip()
+        remove = norm.isin(valores_filtro) & mask_somente_12
+        df_filtrado = df_filtrado[~remove].copy()
 
     if aplicar_3026_15 and 'TIPO_ARQUIVO' in df_filtrado.columns:
         df_filtrado = df_filtrado[df_filtrado['TIPO_ARQUIVO'] == '3026-15'].copy()
@@ -745,15 +835,15 @@ def processar_3026_12_com_abas(
     try:
         resumo = process_3026_12(df, bank_name)
 
-        # Validar se resumo tem as chaves esperadas
-        if 'aud' not in resumo or 'naud' not in resumo:
+        if 'aud' not in resumo or 'naud' not in resumo or 'todos_full' not in resumo:
             logger.error(f"❌ Resumo de 3026-12 inválido. Chaves: {resumo.keys()}")
             raise ValueError("Estrutura de resumo inválida para 3026-12")
 
         df_aud, total_aud, unicos_aud, duplicados_aud = resumo['aud']
         df_naud, total_naud, unicos_naud, duplicados_naud = resumo['naud']
+        df_todos = resumo['todos_full']
 
-        logger.info(f"📊 3026-12 separado: AUD={len(df_aud)}, NAUD={len(df_naud)}")
+        logger.info(f"📊 3026-12 separado: AUD={len(df_aud)}, NAUD={len(df_naud)}, TODOS={len(df_todos)}")
 
         def preparar_sub_df(sub_df: pd.DataFrame, tipo: str) -> pd.DataFrame:
             if sub_df.empty:
@@ -770,11 +860,6 @@ def processar_3026_12_com_abas(
 
         df_aud_processado = preparar_sub_df(df_aud, 'aud')
         df_naud_processado = preparar_sub_df(df_naud, 'naud')
-
-        dfs_para_todos = [df for df in [df_aud_processado, df_naud_processado] if not df.empty]
-        df_todos = pd.concat(dfs_para_todos, ignore_index=True) if dfs_para_todos else pd.DataFrame()
-
-        logger.info(f"📊 DataFrame TODOS: {len(df_todos)} registros")
 
         # Criar dicionário de períodos
         periodos = {}
@@ -831,6 +916,16 @@ def processar_3026_12_com_abas(
 
         logger.info("✅ Abas 3026-12 construídas com sucesso")
 
+        st_aud = {
+            'total_linhas': total_aud,
+            'total_unicos': unicos_aud,
+            'total_duplicados': duplicados_aud
+        }
+        st_naud = {
+            'total_linhas': total_naud,
+            'total_unicos': unicos_naud,
+            'total_duplicados': duplicados_naud
+        }
         return {
             'abas': {
                 'todos': df_todos,
@@ -841,16 +936,11 @@ def processar_3026_12_com_abas(
                 'todos_ultimos_2_meses': periodos['todos_ultimos_2_meses']
             },
             'stats': {
-                'aud': {
-                    'total_linhas': total_aud,
-                    'total_unicos': unicos_aud,
-                    'total_duplicados': duplicados_aud
-                },
-                'naud': {
-                    'total_linhas': total_naud,
-                    'total_unicos': unicos_naud,
-                    'total_duplicados': duplicados_naud
-                }
+                'aud': st_aud,
+                'naud': st_naud,
+                'auditados': st_aud,
+                'nauditados': st_naud,
+                'Nauditados': st_naud,
             }
         }
     
@@ -866,8 +956,14 @@ def gerar_resumo_geral(df_full: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     df = df_full.copy()
-    df['BANCO'] = df.get('BANCO', 'NÃO INFORMADO').fillna('NÃO INFORMADO')
-    df['DUPLICADO'] = df.get('DUPLICADO', False)
+    if 'BANCO' in df.columns:
+        df['BANCO'] = df['BANCO'].fillna('NÃO INFORMADO')
+    else:
+        df['BANCO'] = 'NÃO INFORMADO'
+    if 'DUPLICADO' in df.columns:
+        df['DUPLICADO'] = df['DUPLICADO'].fillna(False)
+    else:
+        df['DUPLICADO'] = False
 
     group_cols = ['BANCO', 'TIPO_ARQUIVO']
     if 'AUDITADO_TIPO' in df.columns:
@@ -951,12 +1047,14 @@ def apply_excel_formatting(writer, df: pd.DataFrame, sheet_name: str):
         'DT.ULT.AUDITORIA', 'DT.ULT.NEGOCIACAO', 'DATA STATUS'
     ]
     
-    # Formatar TODAS as colunas de data (detectar por nome)
+    # Formatar colunas de data (nome, dtype datetime ou object com datas)
     for col_name in df.columns:
+        is_dt_dtype = pd.api.types.is_datetime64_any_dtype(df[col_name])
         is_date_col = (
-            col_name in colunas_data_conhecidas or 
-            col_name.upper().startswith('DT.') or 
-            col_name.upper().startswith('DATA')
+            col_name in colunas_data_conhecidas
+            or str(col_name).upper().startswith('DT.')
+            or str(col_name).upper().startswith('DATA')
+            or is_dt_dtype
         )
         
         if is_date_col:
@@ -965,6 +1063,18 @@ def apply_excel_formatting(writer, df: pd.DataFrame, sheet_name: str):
                 col_letter = get_column_letter(col_idx)
                 for row in range(2, len(df) + 2):
                     cell = worksheet[f"{col_letter}{row}"]
+                    v = cell.value
+                    if v is not None:
+                        try:
+                            if isinstance(v, datetime):
+                                cell.value = v.date()
+                            elif isinstance(v, date) and not isinstance(v, datetime):
+                                cell.value = v
+                            elif hasattr(v, 'to_pydatetime'):
+                                pd_dt = v.to_pydatetime()
+                                cell.value = pd_dt.date()
+                        except Exception:
+                            pass
                     cell.number_format = 'DD/MM/YYYY'
             except Exception as e:
                 logger.warning(f"Erro ao formatar coluna de data {col_name}: {e}")
@@ -1098,7 +1208,7 @@ async def process_contratos(
         logger.info(f"========================================")
         
         # Validar bank_type
-        bank_type_normalized = bank_type.lower().replace(" ", "_")
+        bank_type_normalized = _normalize_bank_type_key(bank_type)
         if bank_type_normalized not in ['bemge', 'minas_caixa']:
             raise HTTPException(
                 status_code=400,
@@ -1261,13 +1371,15 @@ async def process_contratos(
                         df_processado,
                         aplicar_periodo=True,
                         reference_date=reference_date,
-                        months_back=months_back
+                        months_back=months_back,
+                        bank_type=bank_type_normalized
                     )
 
                 all_contratos.append(df_processado)
                 dados_por_aba['3026-11'].append(df_processado.copy())
 
-                save_filename = f"3026-11 - {bank_name} - {total_unicos} (CONTRATOS).xlsx"
+                n_arquivo = int(df_processado['CONTRATO'].nunique()) if 'CONTRATO' in df_processado.columns else len(df_processado)
+                save_filename = f"3026-11 - {bank_name} - {n_arquivo} (CONTRATOS).xlsx"
                 save_filepath = base_dir / save_filename
                 save_processed_file(df_processado, str(save_filepath))
 
@@ -1305,13 +1417,15 @@ async def process_contratos(
                         df_processado,
                         aplicar_periodo=True,
                         reference_date=reference_date,
-                        months_back=months_back
+                        months_back=months_back,
+                        bank_type=bank_type_normalized
                     )
 
                 all_contratos.append(df_processado)
                 dados_por_aba['3026-15'].append(df_processado.copy())
 
-                save_filename = f"3026-15 - {bank_name} - {total_unicos} (CONTRATOS).xlsx"
+                n_arquivo = int(df_processado['CONTRATO'].nunique()) if 'CONTRATO' in df_processado.columns else len(df_processado)
+                save_filename = f"3026-15 - {bank_name} - {n_arquivo} (CONTRATOS).xlsx"
                 save_filepath = base_dir / save_filename
                 save_processed_file(df_processado, str(save_filepath))
 
@@ -1432,17 +1546,12 @@ async def process_contratos(
             df_filtrado,
             aplicar_periodo=period_filter_active,
             reference_date=reference_date,
-            months_back=months_back
+            months_back=months_back,
+            bank_type=bank_type_normalized
         )
 
-        df_ultimos_2_meses = (
-            filtrar_planilha_contratos(
-                df_full,
-                aplicar_periodo=period_filter_active,
-                reference_date=reference_date,
-                months_back=months_back
-            ) if period_filter_active else pd.DataFrame()
-        )
+        # Mesma lógica da consolidação filtrada (inclui filter_type + período + DEST só no 3026-12)
+        df_ultimos_2_meses = df_filtrado.copy() if period_filter_active else pd.DataFrame()
 
         df_resumo = gerar_resumo_geral(df_full)
         df_repetidos = gerar_contratos_repetidos(df_full)

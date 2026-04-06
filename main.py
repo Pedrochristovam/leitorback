@@ -3,10 +3,40 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from typing import List, Optional
-import pandas as pd
 import io
+import re
+import unicodedata
+
+import pandas as pd
 from app.services.process_contratos import process_contratos
 from app.routes import files
+
+
+def _normalize_bank_type_form(raw: str) -> str:
+    x = (raw or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if x in ("minascaixa", "minas_caixa", "minas", "mc", "caixa", "caixa_minas"):
+        return "minas_caixa"
+    if x in ("bemge", "bem_ge"):
+        return "bemge"
+    return (raw or "").strip()
+
+
+def _normalize_filter_type_form(raw: str) -> str:
+    if not raw:
+        return "todos"
+    s = raw.strip()
+    key = "".join(
+        c for c in unicodedata.normalize("NFKD", s.lower()) if not unicodedata.combining(c)
+    )
+    key = re.sub(r"\s+", "", key)
+    if key in ("todos", "all", "todas"):
+        return "todos"
+    if key in ("auditado", "auditados", "aud", "audi"):
+        return "auditado"
+    if key in ("nauditado", "nauditados", "naud", "naoauditado"):
+        return "nauditado"
+    return s
+
 
 app = FastAPI()
 
@@ -108,6 +138,14 @@ async def processar_contratos_endpoint(
             detail=f"file_type inválido: '{file_type}'. Valores aceitos: {', '.join(valid_file_types)}"
         )
     file_type = file_type_normalized
+
+    bank_type = _normalize_bank_type_form(bank_type)
+    filter_type = _normalize_filter_type_form(filter_type)
+    if filter_type not in ["auditado", "nauditado", "todos"]:
+        raise HTTPException(
+            status_code=400,
+            detail="filter_type deve ser 'auditado', 'nauditado' ou 'todos' (ou 'aud' / 'naud')",
+        )
     
     # Validar period_filter_enabled
     if period_filter_enabled not in ["true", "false"]:
