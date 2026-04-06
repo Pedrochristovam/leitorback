@@ -3,5 +3,7 @@
   "venv": ".venv",
   "pythonVersion": "3.14",
   "typeCheckingMode": "basic",
-  "reportMissingModuleSource": "none"
+  "reportMissingModuleSource": "none",
+  "include": ["app", "main.py"],
+  "exclude": [".venv", "**/__pycache__"]
 }
