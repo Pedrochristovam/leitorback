@@ -131,6 +131,18 @@ def format_column_d_as_text(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _stats_total_unicos(stats: dict, subset_key: str) -> int:
+    """Lê total_unicos com fallbacks (evita KeyError auditados/nauditados em integrações antigas)."""
+    blk = stats.get(subset_key)
+    if blk is None and subset_key == 'aud':
+        blk = stats.get('auditados')
+    if blk is None and subset_key == 'naud':
+        blk = stats.get('nauditados') or stats.get('Nauditados')
+    if isinstance(blk, dict):
+        return int(blk.get('total_unicos', 0))
+    return 0
+
+
 def _normalize_auditado_token(v) -> str:
     if pd.isna(v):
         return ''
@@ -148,6 +160,7 @@ def resolve_manifestacao_column(
 ) -> Optional[str]:
     """
     Descobre coluna de data para filtro de período (manifestação ou equivalente).
+    Varre índices típicos e, em planilhas largas, faixa 20–54 para achar a coluna com mais datas válidas.
     """
     if df.empty:
         return None
@@ -165,9 +178,11 @@ def resolve_manifestacao_column(
         if 'MANIFEST' in str(col).upper():
             return col
 
-    candidate_indices = [32, 31, 33, 30, 34, 29, 28, 35]
+    candidate_indices = [32, 31, 33, 30, 34, 29, 28, 35, 26, 27, 36]
     if bank_type == 'minas_caixa':
-        candidate_indices = [32, 31, 33, 30, 34, 29, 28] + [19, 23, 25]
+        candidate_indices = [32, 31, 33, 30, 34, 29, 28, 24] + [19, 23, 25]
+    wide_scan = list(range(20, min(55, len(df.columns))))
+    candidate_indices = list(dict.fromkeys(candidate_indices + wide_scan))
 
     best_col, best_score = None, 0.0
     for idx in candidate_indices:
@@ -179,7 +194,8 @@ def resolve_manifestacao_column(
         if score > best_score:
             best_col, best_score = col, score
 
-    if best_col is not None and best_score >= 0.08:
+    min_ratio = 0.035
+    if best_col is not None and best_score >= min_ratio:
         logger.info(f"Coluna de período inferida ({best_score:.0%} válida): {best_col!r}")
         return best_col
 
@@ -218,6 +234,35 @@ def format_date_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def format_object_columns_that_look_like_dates(df: pd.DataFrame, max_scan_cols: int = 80) -> pd.DataFrame:
+    """
+    Converte colunas object que na maior parte são datas (evita horas visíveis em abas Minas/Bemge).
+    """
+    if df.empty:
+        return df
+    df = df.copy()
+    n = min(len(df.columns), max_scan_cols)
+    for i, col in enumerate(df.columns[:n]):
+        if col in ('BANCO', 'TIPO_ARQUIVO', 'AUDITADO_TIPO'):
+            continue
+        ser = df[col]
+        if ser.dtype != object:
+            continue
+        sample = ser.dropna().head(400)
+        if len(sample) < 5:
+            continue
+        parsed = pd.to_datetime(sample, errors='coerce', dayfirst=True)
+        ratio = float(parsed.notna().mean())
+        if ratio < 0.45:
+            continue
+        try:
+            df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=True).dt.date
+            logger.debug(f"Coluna object tratada como data: {col!r} (~{ratio:.0%} amostra válida)")
+        except Exception:
+            continue
+    return df
+
+
 def format_date_columns_by_index(df: pd.DataFrame, indices: list) -> pd.DataFrame:
     """
     Formata colunas de data específicas por índice (0-based), removendo a hora.
@@ -247,7 +292,7 @@ def remove_general_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ========================================
-# ✅ NOVA FUNÇÃO: FILTRO HABITACIONAL (COLUNAS W E Y)
+# FILTRO HABITACIONAL (coluna Y — BEMGE só Y; Minas Y)
 # ========================================
 def apply_habitacional_filter(
     df: pd.DataFrame,
@@ -256,19 +301,9 @@ def apply_habitacional_filter(
     months_back: int = 2
 ) -> pd.DataFrame:
     """
-    ✅ CORREÇÃO CRÍTICA: Aplica filtro habitacional verificando colunas W e Y.
-    
-    - BEMGE: Verifica coluna W (índice 22) E coluna Y (índice 24) com OR lógico
-    - MINAS CAIXA: Verifica coluna Y (índice 24) obrigatoriamente
-    
-    Args:
-        df: DataFrame a ser filtrado
-        bank_type: 'bemge' ou 'minas_caixa'
-        reference_date: Data de referência no formato "YYYY-MM-DD"
-        months_back: Número de meses para trás
-    
-    Returns:
-        DataFrame filtrado
+    Filtro habitacional por data na coluna Y (índice 24), janela [corte, referência].
+    BEMGE: somente coluna Y (definição operacional dos testes).
+    MINAS CAIXA: coluna Y (índice 24).
     """
     if df.empty or not reference_date:
         logger.debug("Filtro habitacional: DataFrame vazio ou sem data de referência")
@@ -287,20 +322,13 @@ def apply_habitacional_filter(
         
         logger.info(f"   Intervalo: {data_corte} até {data_ref}")
         
-        # Determinar quais colunas verificar
         columns_to_check = []
-        
         if bank_type == 'bemge':
-            # BEMGE: Verificar W (22) E Y (24)
-            logger.info(f"   BEMGE: Verificando colunas W (índice 22) e Y (índice 24)")
-            if len(df.columns) > 22:
-                columns_to_check.append((22, 'W'))
+            logger.info("   BEMGE: filtro habitacional apenas na coluna Y (índice 24)")
             if len(df.columns) > 24:
                 columns_to_check.append((24, 'Y'))
-        
         elif bank_type == 'minas_caixa':
-            # MINAS CAIXA: Verificar Y (24) obrigatória
-            logger.info(f"   MINAS CAIXA: Verificando coluna Y (índice 24)")
+            logger.info("   MINAS CAIXA: coluna Y (índice 24)")
             if len(df.columns) > 24:
                 columns_to_check.append((24, 'Y'))
         
@@ -428,9 +456,15 @@ def filter_by_period(
             logger.warning("   ❌ Filtro de período NÃO aplicado")
             return df
         
-        min_date = parsed.min()
-        max_date = parsed.max()
-        logger.info(f"   Range de datas nos dados: {min_date.date()} até {max_date.date()}")
+        try:
+            min_date = parsed.min()
+            max_date = parsed.max()
+            if pd.notna(min_date) and pd.notna(max_date):
+                logger.info(
+                    f"   Range de datas nos dados: {pd.Timestamp(min_date).date()} até {pd.Timestamp(max_date).date()}"
+                )
+        except Exception as ex:
+            logger.warning(f"   Não foi possível exibir range de datas: {ex}")
         
         mask = (parsed_day >= pd.Timestamp(data_corte)) & (parsed_day <= pd.Timestamp(data_ref))
         df_filtrado = df[mask].copy()
@@ -479,10 +513,10 @@ def process_3026_11(df: pd.DataFrame, bank_name: str) -> tuple:
     # Fazer cópia para evitar problemas de referência
     df = df.copy()
     
-    # Para MINAS CAIXA: formatar colunas T, X, Z (índices 19, 23, 25) removendo horas
+    # MINAS CAIXA: datas em T, X, Z e colunas comuns de manifestação / período
     if 'MINAS' in bank_name.upper():
-        logger.debug("Aplicando formatação de data para colunas T, X, Z (MINAS CAIXA)")
-        df = format_date_columns_by_index(df, [19, 23, 25])
+        logger.debug("Formatação de datas (3026-11 Minas: T,X,Z e índices de período)")
+        df = format_date_columns_by_index(df, [19, 23, 25, 24, 31, 32, 33, 30])
     
     # Formatar coluna D como texto
     df = format_column_d_as_text(df)
@@ -505,15 +539,22 @@ def process_3026_11(df: pd.DataFrame, bank_name: str) -> tuple:
     if coluna_contrato != 'CONTRATO':
         df = df.rename(columns={coluna_contrato: 'CONTRATO'})
         logger.debug(f"Coluna {coluna_contrato} renomeada para CONTRATO")
+
+    df = format_contrato_column(df)
     
-    # Contar linhas antes de remover duplicados
     total_linhas = len(df)
-    
-    # Remover duplicados na coluna CONTRATO (manter primeira ocorrência)
-    df_processado = df.drop_duplicates(subset=['CONTRATO'], keep='first').copy()
-    
-    total_unicos = len(df_processado)
-    total_duplicados = total_linhas - total_unicos
+    nunique_c = int(df['CONTRATO'].nunique())
+
+    # Minas: não remover linhas com mesmo contrato (evita “sumir” contrato por arredondamento Excel)
+    if 'MINAS' in bank_name.upper():
+        df_processado = df.copy()
+        total_unicos = nunique_c
+        total_duplicados = total_linhas - nunique_c
+        logger.debug(f"3026-11 Minas: sem drop_duplicates por CONTRATO; linhas={total_linhas}, nunique={nunique_c}")
+    else:
+        df_processado = df.drop_duplicates(subset=['CONTRATO'], keep='first').copy()
+        total_unicos = len(df_processado)
+        total_duplicados = total_linhas - total_unicos
     
     logger.debug(f"3026-11 processado: total={total_linhas}, únicos={total_unicos}, duplicados={total_duplicados}")
     
@@ -559,15 +600,21 @@ def process_3026_15(df: pd.DataFrame, bank_name: str) -> tuple:
     if coluna_contrato != 'CONTRATO':
         df = df.rename(columns={coluna_contrato: 'CONTRATO'})
         logger.debug(f"Coluna {coluna_contrato} renomeada para CONTRATO")
+
+    df = format_contrato_column(df)
     
-    # Contar linhas antes de remover duplicados
     total_linhas = len(df)
-    
-    # Remover duplicados na coluna CONTRATO (manter primeira ocorrência)
-    df_processado = df.drop_duplicates(subset=['CONTRATO'], keep='first').copy()
-    
-    total_unicos = len(df_processado)
-    total_duplicados = total_linhas - total_unicos
+    nunique_c = int(df['CONTRATO'].nunique())
+
+    if 'MINAS' in bank_name.upper():
+        df_processado = df.copy()
+        total_unicos = nunique_c
+        total_duplicados = total_linhas - nunique_c
+        logger.debug(f"3026-15 Minas: sem drop_duplicates por CONTRATO")
+    else:
+        df_processado = df.drop_duplicates(subset=['CONTRATO'], keep='first').copy()
+        total_unicos = len(df_processado)
+        total_duplicados = total_linhas - total_unicos
     
     logger.debug(f"3026-15 processado: total={total_linhas}, únicos={total_unicos}, duplicados={total_duplicados}")
     
@@ -594,7 +641,8 @@ def process_3026_12(df: pd.DataFrame, bank_name: str) -> dict:
         logger.warning(f"DataFrame 3026-12 está vazio para {bank_name}")
         return {
             'aud': (pd.DataFrame(), 0, 0, 0),
-            'naud': (pd.DataFrame(), 0, 0, 0)
+            'naud': (pd.DataFrame(), 0, 0, 0),
+            'todos_full': pd.DataFrame(),
         }
     
     # Fazer cópia para evitar problemas de referência
@@ -926,15 +974,18 @@ def processar_3026_12_com_abas(
             'total_unicos': unicos_naud,
             'total_duplicados': duplicados_naud
         }
+        abas_out = {
+            'todos': df_todos,
+            'aud': df_aud_processado,
+            'naud': df_naud_processado,
+            'auditados_ultimos_2_meses': periodos['auditados_ultimos_2_meses'],
+            'naud_ultimos_2_meses': periodos['naud_ultimos_2_meses'],
+            'todos_ultimos_2_meses': periodos['todos_ultimos_2_meses'],
+        }
+        abas_out['auditados'] = df_aud_processado
+        abas_out['nauditados'] = df_naud_processado
         return {
-            'abas': {
-                'todos': df_todos,
-                'aud': df_aud_processado,  # ✅ Mudado de 'auditados' para 'aud'
-                'naud': df_naud_processado,
-                'auditados_ultimos_2_meses': periodos['auditados_ultimos_2_meses'],
-                'naud_ultimos_2_meses': periodos['naud_ultimos_2_meses'],
-                'todos_ultimos_2_meses': periodos['todos_ultimos_2_meses']
-            },
+            'abas': abas_out,
             'stats': {
                 'aud': st_aud,
                 'naud': st_naud,
@@ -1317,6 +1368,7 @@ async def process_contratos(
             
             # Formatação de datas
             df = format_date_columns(df)
+            df = format_object_columns_that_look_like_dates(df)
             
             # Remover colunas gerais
             df = remove_general_columns(df)
@@ -1500,7 +1552,9 @@ async def process_contratos(
                         )
                         logger.info(f"      {tipo_label} após filtro: {len(df_para_salvar)} registros")
 
-                    total_unicos = stats[subset_key_stats]['total_unicos']
+                    total_unicos = _stats_total_unicos(stats, subset_key_stats)
+                    if total_unicos <= 0 and 'CONTRATO' in df_subset.columns:
+                        total_unicos = int(df_subset['CONTRATO'].nunique())
                     save_filename = f"3026-12 - {bank_name} - {tipo_label} - {total_unicos} (CONTRATOS).xlsx"
                     save_filepath = base_dir / save_filename
 
