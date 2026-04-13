@@ -153,6 +153,75 @@ def _normalize_auditado_token(v) -> str:
     return t
 
 
+# Classificação AUD / NAUD (mesmo critério do 3026-12) para 3026-11/15 e consolidação
+AUD_CLASSIFY_TOKENS = frozenset({
+    'AUDI', 'AUD', 'AUDITADO', 'AUDITADOS', 'AUDIT.', 'SIM', 'S',
+    '1', '1.0', 'TRUE', 'VERDADEIRO',
+})
+NAUD_CLASSIFY_TOKENS = frozenset({
+    'NAUD', 'NAUD.', 'NAOAUDITADO', 'NAUDITADO', 'NAOAUDITADOS', 'NAUDITADOS',
+    'NAO', '2', '2.0', 'FALSE', 'FALSO', 'NAOAUD.',
+})
+
+
+def filtrar_dataframe_por_tipo_auditado(df: pd.DataFrame, filter_type: str) -> pd.DataFrame:
+    """Restringe linhas pela coluna AUDITADO (3026-11 / 3026-15) com tokens normalizados."""
+    if df is None or df.empty or filter_type == 'todos':
+        return df.copy() if df is not None and not df.empty else df
+    if 'AUDITADO' not in df.columns:
+        return df.copy()
+    keys = df['AUDITADO'].map(_normalize_auditado_token)
+    if filter_type == 'auditado':
+        return df[keys.isin(AUD_CLASSIFY_TOKENS)].copy()
+    if filter_type == 'nauditado':
+        return df[keys.isin(NAUD_CLASSIFY_TOKENS)].copy()
+    return df.copy()
+
+
+def aplicar_escopo_filter_type(df: pd.DataFrame, filter_type: str) -> pd.DataFrame:
+    """
+    Aplica o mesmo 'filtro de opção' do front em toda a consolidação:
+    Resumo, Repetidos, Por Banco e base de Dados Filtrados ficam alinhados.
+    """
+    if df is None or len(df) == 0:
+        return df.copy() if df is not None else pd.DataFrame()
+    if filter_type == 'todos':
+        return df.copy()
+    out = df.copy()
+    if 'AUDITADO_TIPO' in out.columns:
+        if filter_type == 'auditado':
+            return out[out['AUDITADO_TIPO'].eq('AUD')].copy()
+        if filter_type == 'nauditado':
+            return out[out['AUDITADO_TIPO'].eq('NAUD')].copy()
+    return filtrar_dataframe_por_tipo_auditado(out, filter_type)
+
+
+def _effective_aba_key_3026_12(chave_dados: str, filter_type: str) -> Optional[str]:
+    """
+    Qual chave em `abas` usar para alimentar cada lista de dados_3026_12,
+    conforme filter_type (evita abas 'opostas' cheias quando só AUD ou só NAUD foi pedido).
+    """
+    if filter_type == 'todos':
+        return None  # usar mapeamento direto chave_aba original
+    if filter_type == 'auditado':
+        if chave_dados in ('naud', 'naud_ultimos_2_meses'):
+            return '__skip__'
+        if chave_dados == 'todos':
+            return 'aud'
+        if chave_dados == 'todos_ultimos_2_meses':
+            return 'auditados_ultimos_2_meses'
+        return None
+    if filter_type == 'nauditado':
+        if chave_dados in ('auditados', 'auditados_ultimos_2_meses'):
+            return '__skip__'
+        if chave_dados == 'todos':
+            return 'naud'
+        if chave_dados == 'todos_ultimos_2_meses':
+            return 'naud_ultimos_2_meses'
+        return None
+    return None
+
+
 def resolve_manifestacao_column(
     df: pd.DataFrame,
     bank_type: Optional[str] = None,
@@ -738,15 +807,8 @@ def process_3026_12(df: pd.DataFrame, bank_name: str) -> dict:
     filter_cols = ['DEST.PAGAM', 'DEST.COMPLEM']
     has_filter_cols = any(col in df.columns for col in filter_cols)
     
-    # Tokens já no formato de _normalize_auditado_token (sem espaços / sem acentos)
-    aud_tokens = {
-        'AUDI', 'AUD', 'AUDITADO', 'AUDITADOS', 'AUDIT.', 'SIM', 'S',
-        '1', '1.0', 'TRUE', 'VERDADEIRO',
-    }
-    naud_tokens = {
-        'NAUD', 'NAUD.', 'NAOAUDITADO', 'NAUDITADO', 'NAOAUDITADOS', 'NAUDITADOS',
-        'NAO', '2', '2.0', 'FALSE', 'FALSO', 'NAOAUD.',
-    }
+    aud_tokens = AUD_CLASSIFY_TOKENS
+    naud_tokens = NAUD_CLASSIFY_TOKENS
     keys = df[coluna_auditado].map(_normalize_auditado_token)
     extra_map = {_normalize_auditado_token(v) for v in df[coluna_auditado].unique() if pd.notna(v)}
     logger.debug(f"AUDITADO chaves normalizadas (amostra): {list(extra_map)[:25]}")
@@ -1391,17 +1453,7 @@ async def process_contratos(
                 df_processado['BANCO'] = bank_name
                 df_processado['DUPLICADO'] = df_processado['CONTRATO'].duplicated(keep=False)
 
-                # Filtro por tipo (auditado/nauditado/todos)
-                if filter_type != 'todos' and 'AUDITADO' in df_processado.columns:
-                    df_processado['AUDITADO'] = df_processado['AUDITADO'].astype(str).str.upper().str.strip()
-                    if filter_type == 'auditado':
-                        df_processado = df_processado[
-                            df_processado['AUDITADO'].isin(['AUDI', 'AUD', 'AUDITADO'])
-                        ].copy()
-                    elif filter_type == 'nauditado':
-                        df_processado = df_processado[
-                            df_processado['AUDITADO'].isin(['NAUD', 'NAO AUDITADO', 'NAUDITADO'])
-                        ].copy()
+                df_processado = filtrar_dataframe_por_tipo_auditado(df_processado, filter_type)
 
                 # ✅ APLICAR FILTRO HABITACIONAL (NOVO)
                 if habitacional_filter_active:
@@ -1452,16 +1504,7 @@ async def process_contratos(
                 df_processado['BANCO'] = bank_name
                 df_processado['DUPLICADO'] = df_processado['CONTRATO'].duplicated(keep=False)
 
-                if filter_type != 'todos' and 'AUDITADO' in df_processado.columns:
-                    df_processado['AUDITADO'] = df_processado['AUDITADO'].astype(str).str.upper().str.strip()
-                    if filter_type == 'auditado':
-                        df_processado = df_processado[
-                            df_processado['AUDITADO'].isin(['AUDI', 'AUD', 'AUDITADO'])
-                        ].copy()
-                    elif filter_type == 'nauditado':
-                        df_processado = df_processado[
-                            df_processado['AUDITADO'].isin(['NAUD', 'NAO AUDITADO', 'NAUDITADO'])
-                        ].copy()
+                df_processado = filtrar_dataframe_por_tipo_auditado(df_processado, filter_type)
 
                 if period_filter_active:
                     logger.info(f"\n📅 APLICANDO FILTRO DE PERÍODO")
@@ -1503,11 +1546,11 @@ async def process_contratos(
                 tem_3026_12 = True
 
                 logger.info(f"📋 Abas disponíveis: {list(abas.keys())}")
+                logger.info(f"📌 Escopo 3026-12 alinhado a filter_type={filter_type!r}")
 
-                # Mapear nomes de chaves corretamente
                 chaves_para_dados = {
                     'todos': 'todos',
-                    'aud': 'auditados',  # ✅ Mapeamento correto
+                    'aud': 'auditados',
                     'naud': 'naud',
                     'auditados_ultimos_2_meses': 'auditados_ultimos_2_meses',
                     'naud_ultimos_2_meses': 'naud_ultimos_2_meses',
@@ -1515,19 +1558,28 @@ async def process_contratos(
                 }
 
                 for chave_aba, chave_dados in chaves_para_dados.items():
-                    if chave_aba in abas:
-                        subset = abas[chave_aba]
-                        if not subset.empty:
-                            logger.info(f"   Adicionando {chave_dados}: {len(subset)} registros")
-                            dados_3026_12[chave_dados].append(subset.copy())
-                        else:
-                            logger.debug(f"   {chave_dados} está vazio")
+                    redirect = _effective_aba_key_3026_12(chave_dados, filter_type)
+                    if redirect == '__skip__':
+                        continue
+                    aba_ler = chave_aba if redirect is None else redirect
+                    if aba_ler not in abas:
+                        continue
+                    subset = abas[aba_ler]
+                    if not subset.empty:
+                        logger.info(f"   Adicionando {chave_dados} (aba={aba_ler}): {len(subset)} registros")
+                        dados_3026_12[chave_dados].append(subset.copy())
+                    else:
+                        logger.debug(f"   {chave_dados} está vazio")
 
-                # Processar AUD e NAUD para salvar arquivos individuais
+                # Processar AUD e NAUD para salvar arquivos individuais e all_contratos
                 for tipo_label, subset_key_aba, subset_key_stats in [
-                    ('AUD', 'aud', 'aud'), 
+                    ('AUD', 'aud', 'aud'),
                     ('NAUD', 'naud', 'naud')
                 ]:
+                    if filter_type == 'auditado' and subset_key_aba == 'naud':
+                        continue
+                    if filter_type == 'nauditado' and subset_key_aba == 'aud':
+                        continue
                     df_subset = abas.get(subset_key_aba)
                     if df_subset is None or df_subset.empty:
                         logger.warning(f"   ⚠️  Subset {tipo_label} está vazio ou não existe")
@@ -1580,36 +1632,25 @@ async def process_contratos(
         logger.info(f"\n{'='*60}")
         logger.info(f"📊 CONSOLIDAÇÃO FINAL")
         logger.info(f"{'='*60}")
-        logger.info(f"Total de contratos consolidados: {len(df_full)}")
+        logger.info(f"Total de linhas (pré-escopo opção): {len(df_full)}")
 
-        df_filtrado = df_full.copy()
-        if filter_type != 'todos':
-            if 'AUDITADO_TIPO' in df_filtrado.columns:
-                if filter_type == 'auditado':
-                    df_filtrado = df_filtrado[df_filtrado['AUDITADO_TIPO'] == 'AUD'].copy()
-                elif filter_type == 'nauditado':
-                    df_filtrado = df_filtrado[df_filtrado['AUDITADO_TIPO'] == 'NAUD'].copy()
-            elif 'AUDITADO' in df_filtrado.columns:
-                df_filtrado['AUDITADO'] = df_filtrado['AUDITADO'].astype(str).str.upper().str.strip()
-                if filter_type == 'auditado':
-                    df_filtrado = df_filtrado[df_filtrado['AUDITADO'].isin(['AUDI', 'AUD', 'AUDITADO'])].copy()
-                elif filter_type == 'nauditado':
-                    df_filtrado = df_filtrado[df_filtrado['AUDITADO'].isin(['NAUD', 'NAO AUDITADO', 'NAUDITADO'])].copy()
+        # Mesmo conjunto que o usuário escolheu no front: resumos = escopo; período aplica em cima
+        df_escopo = aplicar_escopo_filter_type(df_full, filter_type)
+        logger.info(f"Após filter_type={filter_type!r}: {len(df_escopo)} linhas no escopo consolidado")
 
         df_filtrado = filtrar_planilha_contratos(
-            df_filtrado,
+            df_escopo.copy(),
             aplicar_periodo=period_filter_active,
             reference_date=reference_date,
             months_back=months_back,
             bank_type=bank_type_normalized
         )
 
-        # Mesma lógica da consolidação filtrada (inclui filter_type + período + DEST só no 3026-12)
         df_ultimos_2_meses = df_filtrado.copy() if period_filter_active else pd.DataFrame()
 
-        df_resumo = gerar_resumo_geral(df_full)
-        df_repetidos = gerar_contratos_repetidos(df_full)
-        df_contratos_por_banco = gerar_contratos_por_banco(df_full)
+        df_resumo = gerar_resumo_geral(df_escopo)
+        df_repetidos = gerar_contratos_repetidos(df_escopo)
+        df_contratos_por_banco = gerar_contratos_por_banco(df_escopo)
         
         logger.info(f"✅ Dados filtrados: {len(df_filtrado)} registros")
         logger.info(f"✅ Resumos gerados com sucesso")
