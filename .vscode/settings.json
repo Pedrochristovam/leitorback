@@ -2,5 +2,8 @@
   "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
   "python.analysis.extraPaths": [],
   "python.analysis.diagnosticMode": "workspace",
-  "python.analysis.include": ["app", "main.py"]
+  "python.analysis.include": ["app", "main.py"],
+  "python.analysis.exclude": [
+    "${env:LOCALAPPDATA}/Python/**"
+  ]
 }

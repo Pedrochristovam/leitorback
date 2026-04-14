@@ -1,3 +1,5 @@
+# pandas/openpyxl têm stubs incompletos; basedpyright acusa muitos falsos positivos aqui.
+# pyright: reportArgumentType=false, reportReturnType=false, reportAssignmentType=false, reportOperatorIssue=false, reportAttributeAccessIssue=false, reportOptionalMemberAccess=false, reportGeneralTypeIssues=false, reportCallIssue=false
 import pandas as pd
 import numpy as np
 import io
@@ -49,12 +51,12 @@ def get_sheet_names(bank_type: str) -> dict:
         }
 
 
-def detect_file_type(filename: str) -> str:
+def detect_file_type(filename: Optional[str]) -> str:
     """
     Detecta o tipo de arquivo baseado no nome.
     Retorna: '3026-11', '3026-12' ou '3026-15'
     """
-    filename_upper = filename.upper()
+    filename_upper = (filename or "").upper()
     if '3026-11' in filename_upper or '302611' in filename_upper:
         return '3026-11'
     elif '3026-12' in filename_upper or '302612' in filename_upper:
@@ -266,11 +268,11 @@ def resolve_manifestacao_column(
     min_ratio = 0.035
     if best_col is not None and best_score >= min_ratio:
         logger.info(f"Coluna de período inferida ({best_score:.0%} válida): {best_col!r}")
-        return best_col
+        return str(best_col)
 
     if bank_type != 'minas_caixa' and len(df.columns) > 32:
         logger.debug(f"Fallback período coluna índice 32: {df.columns[32]!r}")
-        return df.columns[32]
+        return str(df.columns[32])
 
     logger.warning(f"Não foi possível inferir coluna de manifestação/período (bank_type={bank_type})")
     return None
@@ -320,11 +322,28 @@ def format_object_columns_that_look_like_dates(df: pd.DataFrame, max_scan_cols: 
         sample = ser.dropna().head(400)
         if len(sample) < 5:
             continue
-        parsed = pd.to_datetime(sample, errors='coerce', dayfirst=True)
-        ratio = float(parsed.notna().mean())
-        if ratio < 0.45:
-            continue
+        # Heurística: evita "converter código numérico em data" (ex.: 43026 virar DATA no Excel)
+        # Só tentamos tratar como data quando há sinais de string de data ("/" ou "-") ou objetos date/datetime,
+        # e quando os anos parseados parecem plausíveis (>=1990 e <=2100).
         try:
+            # Sinais de "texto de data"
+            sample_str = sample.astype(str)
+            has_sep_ratio = float(sample_str.str.contains(r"[/-]", regex=True).mean())
+            has_dt_obj = bool(sample.map(lambda v: isinstance(v, (datetime, date))).any())
+            if not has_dt_obj and has_sep_ratio < 0.08:
+                continue
+
+            parsed = pd.to_datetime(sample, errors='coerce', dayfirst=True)
+            ratio = float(parsed.notna().mean())
+            if ratio < 0.45:
+                continue
+
+            years = parsed.dropna().dt.year
+            if not years.empty:
+                plausible_year_ratio = float(((years >= 1990) & (years <= 2100)).mean())
+                if plausible_year_ratio < 0.70:
+                    continue
+
             df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=True).dt.date
             logger.debug(f"Coluna object tratada como data: {col!r} (~{ratio:.0%} amostra válida)")
         except Exception:
@@ -468,10 +487,10 @@ def apply_habitacional_filter(
 
 
 def filter_by_period(
-    df: pd.DataFrame, 
-    reference_date: str = None, 
+    df: pd.DataFrame,
+    reference_date: Optional[str] = None,
     months_back: int = 2,
-    date_column: str = None,
+    date_column: Optional[str] = None,
     bank_type: Optional[str] = None
 ) -> pd.DataFrame:
     """
@@ -555,7 +574,7 @@ def filter_by_period(
         return df
 
 
-def filter_last_2_months(df: pd.DataFrame, date_column: str = None) -> pd.DataFrame:
+def filter_last_2_months(df: pd.DataFrame, date_column: Optional[str] = None) -> pd.DataFrame:
     """
     Filtra contratos dos últimos 2 meses baseado na coluna de data de manifestação.
     Função de compatibilidade - usa filter_by_period internamente.
@@ -884,8 +903,8 @@ def filtrar_planilha_contratos(
     months_back: int = 2,
     aplicar_habitacional: bool = False,
     aplicar_3026_15: bool = False,
-    date_column: str = None,
-    bank_type: str = None
+    date_column: Optional[str] = None,
+    bank_type: Optional[str] = None
 ) -> pd.DataFrame:
     """
     ✅ CORRIGIDO: Aplica filtros condicionais em um DataFrame de contratos.
@@ -971,57 +990,54 @@ def processar_3026_12_com_abas(
         df_aud_processado = preparar_sub_df(df_aud, 'aud')
         df_naud_processado = preparar_sub_df(df_naud, 'naud')
 
-        # Criar dicionário de períodos
+        # Abas "Últimos 2 Meses" devem existir mesmo quando o filtro do front está desativado.
+        mb_periodo = months_back if period_filter_active else 2
+        ref_periodo = reference_date if period_filter_active else None
+
+        logger.info(f"🔍 Construindo abas de período 3026-12 (months_back={mb_periodo}, ref={'hoje' if ref_periodo is None else ref_periodo})")
+
         periodos = {}
-        
-        if period_filter_active:
-            logger.info(f"🔍 Aplicando filtro de período para 3026-12...")
-            
-            # Filtrar auditados
-            if not df_aud_processado.empty:
-                logger.info(f"   Filtrando AUD: {len(df_aud_processado)} registros iniciais")
-                periodos['auditados_ultimos_2_meses'] = filtrar_planilha_contratos(
-                    df_aud_processado,
-                    aplicar_periodo=True,
-                    reference_date=reference_date,
-                    months_back=months_back,
-                    bank_type=bank_type
-                )
-                logger.info(f"   AUD filtrado: {len(periodos['auditados_ultimos_2_meses'])} registros")
-            else:
-                periodos['auditados_ultimos_2_meses'] = pd.DataFrame()
-            
-            # Filtrar não auditados
-            if not df_naud_processado.empty:
-                logger.info(f"   Filtrando NAUD: {len(df_naud_processado)} registros iniciais")
-                periodos['naud_ultimos_2_meses'] = filtrar_planilha_contratos(
-                    df_naud_processado,
-                    aplicar_periodo=True,
-                    reference_date=reference_date,
-                    months_back=months_back,
-                    bank_type=bank_type
-                )
-                logger.info(f"   NAUD filtrado: {len(periodos['naud_ultimos_2_meses'])} registros")
-            else:
-                periodos['naud_ultimos_2_meses'] = pd.DataFrame()
-            
-            # Filtrar todos
-            if not df_todos.empty:
-                logger.info(f"   Filtrando TODOS: {len(df_todos)} registros iniciais")
-                periodos['todos_ultimos_2_meses'] = filtrar_planilha_contratos(
-                    df_todos,
-                    aplicar_periodo=True,
-                    reference_date=reference_date,
-                    months_back=months_back,
-                    bank_type=bank_type
-                )
-                logger.info(f"   TODOS filtrado: {len(periodos['todos_ultimos_2_meses'])} registros")
-            else:
-                periodos['todos_ultimos_2_meses'] = pd.DataFrame()
+
+        # Filtrar auditados
+        if not df_aud_processado.empty:
+            logger.info(f"   Filtrando AUD: {len(df_aud_processado)} registros iniciais")
+            periodos['auditados_ultimos_2_meses'] = filtrar_planilha_contratos(
+                df_aud_processado,
+                aplicar_periodo=True,
+                reference_date=ref_periodo,
+                months_back=mb_periodo,
+                bank_type=bank_type
+            )
+            logger.info(f"   AUD filtrado: {len(periodos['auditados_ultimos_2_meses'])} registros")
         else:
-            logger.info("ℹ️  Filtro de período desativado para 3026-12")
             periodos['auditados_ultimos_2_meses'] = pd.DataFrame()
+
+        # Filtrar não auditados
+        if not df_naud_processado.empty:
+            logger.info(f"   Filtrando NAUD: {len(df_naud_processado)} registros iniciais")
+            periodos['naud_ultimos_2_meses'] = filtrar_planilha_contratos(
+                df_naud_processado,
+                aplicar_periodo=True,
+                reference_date=ref_periodo,
+                months_back=mb_periodo,
+                bank_type=bank_type
+            )
+            logger.info(f"   NAUD filtrado: {len(periodos['naud_ultimos_2_meses'])} registros")
+        else:
             periodos['naud_ultimos_2_meses'] = pd.DataFrame()
+
+        # Filtrar todos
+        if not df_todos.empty:
+            logger.info(f"   Filtrando TODOS: {len(df_todos)} registros iniciais")
+            periodos['todos_ultimos_2_meses'] = filtrar_planilha_contratos(
+                df_todos,
+                aplicar_periodo=True,
+                reference_date=ref_periodo,
+                months_back=mb_periodo,
+                bank_type=bank_type
+            )
+            logger.info(f"   TODOS filtrado: {len(periodos['todos_ultimos_2_meses'])} registros")
+        else:
             periodos['todos_ultimos_2_meses'] = pd.DataFrame()
 
         logger.info("✅ Abas 3026-12 construídas com sucesso")
@@ -1274,15 +1290,15 @@ def save_processed_file(df: pd.DataFrame, filepath: str):
 
 
 async def process_contratos(
-    files: List[UploadFile], 
-    bank_type: str, 
-    filter_type: str = "todos", 
+    files: List[UploadFile],
+    bank_type: str,
+    filter_type: str = "todos",
     file_type: str = "todos",
     period_filter_enabled: str = "false",
-    reference_date: str = None,
+    reference_date: Optional[str] = None,
     months_back: int = 2,
     habitacional_filter_enabled: str = "false",  # ✅ NOVO PARÂMETRO
-    habitacional_reference_date: str = None,      # ✅ NOVO PARÂMETRO
+    habitacional_reference_date: Optional[str] = None,  # ✅ NOVO PARÂMETRO
     habitacional_months_back: int = 2             # ✅ NOVO PARÂMETRO
 ) -> StreamingResponse:
     """
@@ -1402,7 +1418,7 @@ async def process_contratos(
         
         # Processar cada arquivo
         for file in files:
-            filename = file.filename
+            filename = file.filename or ""
             filename_upper = filename.upper()
             
             logger.info(f"\n{'='*60}")
@@ -1646,7 +1662,17 @@ async def process_contratos(
             bank_type=bank_type_normalized
         )
 
-        df_ultimos_2_meses = df_filtrado.copy() if period_filter_active else pd.DataFrame()
+        # Aba "Últimos 2 Meses" deve existir mesmo quando o filtro de período está desativado no front.
+        # Quando desativado, calculamos sempre os últimos 2 meses (ref = hoje, months_back = 2).
+        mb_periodo = months_back if period_filter_active else 2
+        ref_periodo = reference_date if period_filter_active else None
+        df_ultimos_2_meses = filtrar_planilha_contratos(
+            df_escopo.copy(),
+            aplicar_periodo=True,
+            reference_date=ref_periodo,
+            months_back=mb_periodo,
+            bank_type=bank_type_normalized
+        )
 
         df_resumo = gerar_resumo_geral(df_escopo)
         df_repetidos = gerar_contratos_repetidos(df_escopo)
@@ -1714,17 +1740,16 @@ async def process_contratos(
                     apply_excel_formatting(writer, df_3026_12_naud, nome_aba_12_naud)
                     add_column_ae_sum(writer, df_3026_12_naud, nome_aba_12_naud)
 
-                if period_filter_active:
-                    for chave, nome_chave in [
-                        ('auditados_ultimos_2_meses', sheet_names['3026-12-ULTIMOS_AUD']),
-                        ('naud_ultimos_2_meses', sheet_names['3026-12-ULTIMOS_NAUD']),
-                        ('todos_ultimos_2_meses', sheet_names['3026-12-ULTIMOS_TODOS'])
-                    ]:
-                        if dados_3026_12[chave]:
-                            df_periodo = pd.concat(dados_3026_12[chave], ignore_index=True)
-                            nome_periodo = nome_chave[:31]
-                            df_periodo.to_excel(writer, sheet_name=nome_periodo, index=False)
-                            apply_excel_formatting(writer, df_periodo, nome_periodo)
+                for chave, nome_chave in [
+                    ('auditados_ultimos_2_meses', sheet_names['3026-12-ULTIMOS_AUD']),
+                    ('naud_ultimos_2_meses', sheet_names['3026-12-ULTIMOS_NAUD']),
+                    ('todos_ultimos_2_meses', sheet_names['3026-12-ULTIMOS_TODOS'])
+                ]:
+                    if dados_3026_12[chave]:
+                        df_periodo = pd.concat(dados_3026_12[chave], ignore_index=True)
+                        nome_periodo = nome_chave[:31]
+                        df_periodo.to_excel(writer, sheet_name=nome_periodo, index=False)
+                        apply_excel_formatting(writer, df_periodo, nome_periodo)
 
             if not df_filtrado.empty:
                 df_filtrado.to_excel(writer, sheet_name='Dados Filtrados', index=False)
@@ -1740,17 +1765,12 @@ async def process_contratos(
                 df_3026_15.to_excel(writer, sheet_name=nome_aba_15, index=False)
                 apply_excel_formatting(writer, df_3026_15, nome_aba_15)
 
-            nome_aba_periodo = f'Últimos {months_back} Meses'[:31]
-            if period_filter_active:
-                if not df_ultimos_2_meses.empty:
-                    df_ultimos_2_meses.to_excel(writer, sheet_name=nome_aba_periodo, index=False)
-                    apply_excel_formatting(writer, df_ultimos_2_meses, nome_aba_periodo)
-                else:
-                    pd.DataFrame({'Mensagem': [f'Nenhum contrato encontrado nos últimos {months_back} meses']}).to_excel(
-                        writer, sheet_name=nome_aba_periodo, index=False
-                    )
+            nome_aba_periodo = f'Últimos {mb_periodo} Meses'[:31]
+            if not df_ultimos_2_meses.empty:
+                df_ultimos_2_meses.to_excel(writer, sheet_name=nome_aba_periodo, index=False)
+                apply_excel_formatting(writer, df_ultimos_2_meses, nome_aba_periodo)
             else:
-                pd.DataFrame({'Mensagem': ['Filtro de período desativado']}).to_excel(
+                pd.DataFrame({'Mensagem': [f'Nenhum contrato encontrado nos últimos {mb_periodo} meses']}).to_excel(
                     writer, sheet_name=nome_aba_periodo, index=False
                 )
         
